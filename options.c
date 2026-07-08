@@ -1449,7 +1449,7 @@ options_push_changes(const char *name)
 	recalculate_sizes();
 	TAILQ_FOREACH(loop, &clients, entry) {
 		if (loop->session != NULL)
-			server_redraw_client(loop);
+			server_redraw_client_no_overlay(loop);
 	}
 }
 

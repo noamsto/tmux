@@ -3219,6 +3219,7 @@ void	 server_client_print(struct client *, int, struct evbuffer *);
 
 /* server-fn.c */
 void	 server_redraw_client(struct client *);
+void	 server_redraw_client_no_overlay(struct client *);
 void	 server_client_update_theme_colours(struct client *);
 void	 server_status_client(struct client *);
 void	 server_redraw_session(struct session *);

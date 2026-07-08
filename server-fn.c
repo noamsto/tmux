@@ -36,6 +36,18 @@ server_redraw_client(struct client *c)
 	c->flags |= CLIENT_ALLREDRAWFLAGS;
 }
 
+/*
+ * Redraw everything except an open overlay. Background pane writes are already
+ * clipped around the overlay, so a redraw that is not caused by the overlay's
+ * own content changing (for example any option change) must not repaint it, or
+ * an open popup flickers on every such redraw (GitHub issue 5336).
+ */
+void
+server_redraw_client_no_overlay(struct client *c)
+{
+	c->flags |= (CLIENT_ALLREDRAWFLAGS & ~CLIENT_REDRAWOVERLAY);
+}
+
 void
 server_status_client(struct client *c)
 {
