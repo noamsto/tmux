@@ -42,6 +42,9 @@ static const char* tty_draw_line_states[] = {
 	"DONE"
 };
 
+static void	tty_draw_line_one(struct tty *, struct screen *, u_int, u_int,
+		    u_int, u_int, u_int, const struct tty_style_ctx *);
+
 /* Clear part of the line. */
 static void
 tty_draw_line_clear(struct tty *tty, u_int px, u_int py, u_int nx,
@@ -113,10 +116,40 @@ tty_draw_line_get_empty(const struct grid_cell *gc,
 	return (empty);
 }
 
-/* Draw a line from screen to tty. */
+/*
+ * Draw a line from screen to tty, clipping around any client overlay (popup or
+ * menu) so callers do not have to work out the visible ranges themselves. When
+ * there is no overlay this draws the whole range in one go.
+ */
 void
 tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
     u_int atx, u_int aty, const struct tty_style_ctx *style_ctx)
+{
+	struct visible_ranges	*r;
+	struct visible_range	*rr;
+	u_int			 i;
+
+	if (atx >= tty->sx)
+		return;
+	if (atx + nx >= tty->sx)
+		nx = tty->sx - atx;
+	if (nx == 0)
+		return;
+
+	r = tty_check_overlay_range(tty, atx, aty, nx);
+	for (i = 0; i < r->used; i++) {
+		rr = &r->ranges[i];
+		if (rr->nx == 0)
+			continue;
+		tty_draw_line_one(tty, s, px + (rr->px - atx), py, rr->nx,
+		    rr->px, aty, style_ctx);
+	}
+}
+
+/* Draw a contiguous line from screen to tty. */
+static void
+tty_draw_line_one(struct tty *tty, struct screen *s, u_int px, u_int py,
+    u_int nx, u_int atx, u_int aty, const struct tty_style_ctx *style_ctx)
 {
 	struct grid		*gd = s->grid;
 	const struct grid_cell	*gcp;

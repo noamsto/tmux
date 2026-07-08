@@ -1408,54 +1408,31 @@ tty_clear_pane_area(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 static void
 tty_draw_pane(struct tty *tty, const struct tty_ctx *ctx, u_int py)
 {
-	struct screen		*s = ctx->s;
-	u_int			 nx = ctx->sx, i, x, rx, ry, j;
-	struct visible_ranges	*r;
-	struct visible_range	*rr;
+	struct screen	*s = ctx->s;
+	u_int		 nx = ctx->sx, i, x, rx, ry;
 
 	log_debug("%s: %s %u", __func__, tty->client->name, py);
 
+	/* tty_draw_line clips around any overlay itself. */
 	if (~ctx->flags & TTY_CTX_WINDOW_BIGGER) {
-		r = tty_check_overlay_range(tty, ctx->xoff, ctx->yoff + py, nx);
-		for (j = 0; j < r->used; j++) {
-			rr = &r->ranges[j];
-			if (rr->nx == 0)
-				continue;
-			tty_draw_line(tty, s, rr->px - ctx->xoff, py, rr->nx,
-			    rr->px, ctx->yoff + py, &ctx->style_ctx);
-		}
+		tty_draw_line(tty, s, 0, py, nx, ctx->xoff, ctx->yoff + py,
+		    &ctx->style_ctx);
 		return;
 	}
-	if (tty_clamp_line(tty, ctx, 0, py, nx, &i, &x, &rx, &ry)) {
-		r = tty_check_overlay_range(tty, x, ry, rx);
-		for (j = 0; j < r->used; j++) {
-			rr = &r->ranges[j];
-			if (rr->nx == 0)
-				continue;
-			tty_draw_line(tty, s, i + rr->px - x, py, rr->nx,
-			    rr->px, ry, &ctx->style_ctx);
-		}
-	}
+	if (tty_clamp_line(tty, ctx, 0, py, nx, &i, &x, &rx, &ry))
+		tty_draw_line(tty, s, i, py, rx, x, ry, &ctx->style_ctx);
 }
 
 void
 tty_cmd_redrawline(struct tty *tty, const struct tty_ctx *ctx)
 {
-	u_int			 i, x, rx, ry, j;
-	struct visible_ranges	*r;
-	struct visible_range	*rr;
+	u_int	i, x, rx, ry;
 
+	/* tty_draw_line clips around any overlay itself. */
 	if (tty_clamp_line(tty, ctx, ctx->ocx, ctx->ocy, ctx->n,
-	    &i, &x, &rx, &ry)) {
-		r = tty_check_overlay_range(tty, x, ry, rx);
-		for (j = 0; j < r->used; j++) {
-			rr = &r->ranges[j];
-			if (rr->nx == 0)
-				continue;
-			tty_draw_line(tty, ctx->s, ctx->ocx + i + rr->px - x,
-			    ctx->ocy, rr->nx, rr->px, ry, &ctx->style_ctx);
-		}
-	}
+	    &i, &x, &rx, &ry))
+		tty_draw_line(tty, ctx->s, ctx->ocx + i, ctx->ocy, rx, x, ry,
+		    &ctx->style_ctx);
 }
 
 /* Check if character needs to be mapped for codeset. */
