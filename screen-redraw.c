@@ -1358,10 +1358,7 @@ redraw_bidi_get(struct redraw_draw_ctx *dctx, struct redraw_span *span)
 	}
 }
 
-/*
- * Get a style for drawing a screen with no style of its own. Without bidi this
- * is NULL, as before.
- */
+/* Get a style for a screen with no style of its own, NULL without bidi. */
 static struct tty_style_ctx *
 redraw_bidi_style(struct tty_style_ctx *style_ctx, struct screen *s, int bidi)
 {
