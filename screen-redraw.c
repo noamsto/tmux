@@ -1328,7 +1328,8 @@ redraw_set_bidi_flags(struct redraw_draw_ctx *dctx)
 	dctx->flags &= ~(REDRAW_BIDI|REDRAW_ISOLATES);
 	if (tty->flags & TTY_BIDI)
 		dctx->flags |= REDRAW_BIDI;
-	else if ((c->flags & CLIENT_UTF8) && tty_term_has(tty->term, TTYC_BIDI))
+	else if (tty->term != NULL && (c->flags & CLIENT_UTF8) &&
+	    tty_term_has(tty->term, TTYC_BIDI))
 		dctx->flags |= REDRAW_ISOLATES;
 }
 
