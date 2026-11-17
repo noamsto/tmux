@@ -42,6 +42,7 @@ static void	screen_write_sync_flush_dirty(struct window_pane *);
 static void	screen_write_sync_apply_scroll(struct screen_write_ctx *,
 		    struct tty_ctx *);
 static int	screen_write_wp_is_obscured(struct window_pane *);
+static int	screen_write_wp_menu_right(struct window_pane *);
 
 struct screen_write_citem {
 	u_int				x;
@@ -190,7 +191,8 @@ screen_write_set_client_cb(struct tty_ctx *ttyctx, struct client *c)
 		ttyctx->xoff += status_side_size(c);
 
 	ttyctx->flags &= ~TTY_CTX_BIDI_REDRAW;
-	if ((c->tty.flags & TTY_BIDI) && screen_write_wp_is_obscured(wp))
+	if ((c->tty.flags & TTY_BIDI) &&
+	    (screen_write_wp_is_obscured(wp) || screen_write_wp_menu_right(wp)))
 		ttyctx->flags |= TTY_CTX_BIDI_REDRAW;
 	tty_set_bidi_ctx(&c->tty, ttyctx);
 
@@ -223,6 +225,21 @@ screen_write_wp_is_obscured(struct window_pane *wp)
 			return (1);
 	}
 	return (0);
+}
+
+/*
+ * Return 1 if a menu starts in the column after this pane. Its isolate
+ * initiator is held by the pane's last cell.
+ */
+static int
+screen_write_wp_menu_right(struct window_pane *wp)
+{
+	struct menu_data	*md = wp->window->menu;
+
+	return (md != NULL &&
+	    (int)menu_x(md) == wp->xoff + (int)wp->sx &&
+	    (int)menu_y(md) < wp->yoff + (int)wp->sy &&
+	    (int)(menu_y(md) + menu_height(md)) > wp->yoff);
 }
 
 /* Return 1 if a menu or floating pane overlaps this pane, cached. */
@@ -507,6 +524,7 @@ screen_write_reset(struct screen_write_ctx *ctx)
 	screen_write_scrollregion(ctx, 0, screen_size_y(s) - 1);
 
 	s->mode = MODE_CURSOR|MODE_WRAP;
+	s->saved_bidi = 0;
 
 	if (options_get_number(global_options, "extended-keys") == 2)
 		s->mode = (s->mode & ~EXTENDED_KEY_MODES)|MODE_KEYS_EXTENDED;

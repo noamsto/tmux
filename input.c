@@ -1052,9 +1052,16 @@ static void
 input_bidi_changed(struct window_pane *wp, int old)
 {
 	struct client	*c;
+	int		 new = wp->base.mode & BIDI_MODES;
 
+	if (((old ^ new) & MODE_BIDI) == 0 &&
+	    ((~new & MODE_BIDI) ||
+	    ((old ^ new) & (MODE_BIDI_AUTO|MODE_BIDI_RTL)) == 0))
+		return;
+	if (!window_pane_is_visible(wp))
+		return;
 	log_debug("%s: %%%u bidi modes 0x%x -> 0x%x", __func__, wp->id, old,
-	    wp->base.mode & BIDI_MODES);
+	    new);
 
 	TAILQ_FOREACH(c, &clients, entry) {
 		if (c->session == NULL || c->session->curw == NULL ||

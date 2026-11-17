@@ -390,6 +390,14 @@ tty_start_tty(struct tty *tty)
 			tty_putcode(tty, TTYC_CLEAR);
 	}
 	tty->flags &= ~(TTY_BIDI|TTY_BIDIAUTO|TTY_BIDIRTL);
+	if (!options_get_number(global_options, "clear-on-attach") &&
+	    tty_has_bidi(tty)) {
+		/*
+		 * Without SMCUP the terminal keeps its bidi modes, so make the
+		 * first redraw set them.
+		 */
+		tty->flags |= TTY_BIDI;
+	}
 	tty_putcode(tty, TTYC_SMKX);
 
 	if (tty_acs_needed(tty)) {
@@ -718,12 +726,12 @@ tty_bidi_isolate(struct tty *tty, int bits, u_int x, u_int y)
 
 /*
  * Count the isolates the pane's own text leaves open in cells px to px + nx - 1
- * of line py. Also return the cell after the last non-blank one and the number
- * of isolate controls seen.
+ * of line py. Also return the cell after the last non-blank one, the number
+ * of isolate controls seen and the number of PDIs with no initiator.
  */
 static u_int
 tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int *last,
-    u_int *controls)
+    u_int *controls, u_int *unmatched)
 {
 	struct grid_cell	 gc;
 	const u_char		*cp;
@@ -731,6 +739,7 @@ tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int *last,
 
 	*last = 0;
 	*controls = 0;
+	*unmatched = 0;
 	for (i = px; i < px + nx; i++) {
 		grid_view_get_cell(s->grid, i, py, &gc);
 		if ((gc.flags & GRID_FLAG_PADDING) ||
@@ -747,11 +756,27 @@ tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int *last,
 			} else if (cp[j + 2] == 0xa9) {
 				if (depth > 0)
 					depth--;
+				else
+					(*unmatched)++;
 				(*controls)++;
 			}
 		}
 	}
 	return (depth);
+}
+
+/*
+ * Should the pane's own isolate controls in these cells be kept? Too many
+ * make the terminal ignore every isolate on the line and an unmatched PDI
+ * would close the one around the pane, so then they are all dropped.
+ */
+int
+tty_bidi_keep(struct screen *s, u_int px, u_int py, u_int nx)
+{
+	u_int	last, controls, unmatched;
+
+	tty_bidi_scan(s, px, py, nx, &last, &controls, &unmatched);
+	return (controls <= 2 && unmatched == 0);
 }
 
 /*
@@ -763,10 +788,14 @@ void
 tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
     u_int nx, u_int x, u_int y)
 {
-	u_int	i, last = nx, controls, depth = 0;
+	u_int	i, last = nx, controls, unmatched, depth = 0;
 
-	if (s != NULL)
-		depth = tty_bidi_scan(s, px, py, nx, &last, &controls);
+	if (s != NULL) {
+		depth = tty_bidi_scan(s, px, py, nx, &last, &controls,
+		    &unmatched);
+		if (controls > 2 || unmatched != 0)
+			depth = 0;
+	}
 
 	if (depth > 0) {
 		tty_cursor(tty, x - nx + last, y);
@@ -1666,8 +1695,13 @@ tty_bidi_line(struct tty *tty, const struct tty_ctx *ctx, u_int py, u_int px,
 
 	if (x == 0 && px <= i && px + nx > i)
 		tty_bidi_isolate(tty, bits, 1, ry);
-	if (x + rx < tty->sx && px < i + rx && px + nx >= i + rx)
+	if (x + rx < tty->sx && px < i + rx && px + nx >= i + rx) {
 		tty_bidi_close(tty, ctx->s, i, py, rx, x + rx, ry);
+		if (status_side_at_column(tty->client) > 0 &&
+		    (u_int)status_side_at_column(tty->client) == x + rx)
+			tty_bidi_isolate(tty, TTY_STYLE_BIDI_ISOLATE, x + rx,
+			    ry);
+	}
 }
 
 /* Redraw a line of a screen at py. */
@@ -1700,14 +1734,14 @@ static void
 tty_bidi_partial(struct tty *tty, const struct tty_ctx *ctx, u_int py,
     u_int px, u_int nx)
 {
-	u_int	i, x, rx, ry, last, controls;
+	u_int	i, x, rx, ry, last, controls, unmatched;
 
 	if (~ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE)
 		return;
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return;
 
-	tty_bidi_scan(ctx->s, i, py, rx, &last, &controls);
+	tty_bidi_scan(ctx->s, i, py, rx, &last, &controls, &unmatched);
 	if (controls != 0)
 		tty_draw_pane(tty, ctx, py);
 	else
@@ -2236,7 +2270,7 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 	if (ctx->flags & TTY_CTX_CELL_INVALIDATE)
 		tty_invalidate(tty);
 	tty_bidi_partial(tty, ctx, ctx->ocy, ctx->ocx,
-		    ctx->cell->data.width);
+	    ctx->cell->data.width);
 }
 
 void

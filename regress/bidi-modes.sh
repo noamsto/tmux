@@ -1,8 +1,8 @@
 #!/bin/sh
 
-# shellcheck disable=SC2016
 # Test bidi mode handling: BDSM (SM/RM 8), auto-detect (private mode 2501),
-# the alternate screen save/restore and RIS, all observed through DECRQM.
+# and the alternate screen save/restore and RIS for both, all observed through
+# DECRQM.
 
 PATH=/bin:/usr/bin
 TERM=screen
@@ -68,6 +68,14 @@ check "BDSM cleared on alternate screen" 8 '\033[8h\033[?1049h' 7 \
 check "BDSM restored on alternate screen exit" 8 \
     '\033[8h\033[?1049h\033[?1049l' 7 '^[[8;1$y'
 check "BDSM cleared by RIS" 8 '\033[8h\033c' 7 '^[[8;2$y'
+check "bidi auto set then reset" '?2501' '\033[?2501h\033[?2501l' 11 \
+    '^[[?2501;2$y'
+check "bidi auto cleared on alternate screen" '?2501' \
+    '\033[?2501h\033[?1049h' 11 '^[[?2501;2$y'
+check "bidi auto restored on alternate screen exit" '?2501' \
+    '\033[?2501h\033[?1049h\033[?1049l' 11 '^[[?2501;1$y'
+check "bidi auto cleared by RIS" '?2501' '\033[?2501h\033c' 11 \
+    '^[[?2501;2$y'
 
 $TMUX kill-server 2>/dev/null
 
