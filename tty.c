@@ -639,7 +639,8 @@ tty_update_features(struct tty *tty)
 int
 tty_has_bidi(struct tty *tty)
 {
-	return ((tty->client->flags & CLIENT_UTF8) &&
+	return (tty->term != NULL &&
+	    (tty->client->flags & CLIENT_UTF8) &&
 	    tty_term_has(tty->term, TTYC_ENBIDI));
 }
 
