@@ -15,26 +15,39 @@ sleep 1
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"; $TMUX kill-server 2>/dev/null' 0 1 15
 
-# Emit each sequence followed by a marker the control client must see.
+# Emit each sequence followed by a marker the control client must see. The
+# last one comes after the second client has attached.
 cat >"$TMP/pane.sh" <<'EOF'
 sleep 2
 printf '\033[8h'; printf 'MARK1'
 printf '\033[?2501h'; printf 'MARK2'
 printf '\033[8l'; printf 'MARK3'
 printf '\033[1 k'; printf 'MARK4'
-sleep 1
-printf '\033[8h'; printf 'MARK5'
+printf '\033[8h'
+sleep 3
+printf '\033[8l'; printf 'MARK5'
 sleep 30
 EOF
 
 $TMUX -f/dev/null new -d -x80 -y24 "sh $TMP/pane.sh" || exit 1
 
+# wait_for <file> <marker>: poll up to 10 seconds.
+wait_for() {
+	n=0
+	while [ $n -lt 10 ]; do
+		grep -q "$2" "$1" 2>/dev/null && return 0
+		sleep 1
+		n=$((n + 1))
+	done
+	return 1
+}
+
 # The first client is attached before the pane writes anything. The second
-# attaches while the pane already has bidi on.
-(sleep 5) | $TMUX -C attach >"$TMP/out1" 2>&1 &
-sleep 1
-(sleep 4) | $TMUX -C attach >"$TMP/out2" 2>&1 &
-sleep 5
+# attaches while the pane has bidi on, then sees it switched off.
+(sleep 12) | $TMUX -C attach >"$TMP/out1" 2>&1 &
+wait_for "$TMP/out1" MARK4
+(sleep 8) | $TMUX -C attach >"$TMP/out2" 2>&1 &
+wait_for "$TMP/out2" MARK5
 
 exit_status=0
 
