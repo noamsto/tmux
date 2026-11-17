@@ -78,6 +78,7 @@ screen_init(struct screen *s, u_int sx, u_int sy, u_int hlimit)
 {
 	s->grid = grid_create(sx, sy, hlimit);
 	s->saved_grid = NULL;
+	s->saved_bidi = 0;
 
 	s->title = xstrdup("");
 	s->titles = NULL;
@@ -114,6 +115,7 @@ screen_reinit(struct screen *s)
 	if (options_get_number(global_options, "extended-keys") == 2)
 		s->mode = (s->mode & ~EXTENDED_KEY_MODES)|MODE_KEYS_EXTENDED;
 
+	s->saved_bidi = 0;
 	if (SCREEN_IS_ALTERNATE(s))
 		screen_alternate_off(s, NULL, 0);
 	s->saved_cx = UINT_MAX;
@@ -679,6 +681,9 @@ screen_alternate_on(struct screen *s, struct grid_cell *gc, int cursor)
 	u_int		 sx, sy;
 	if (SCREEN_IS_ALTERNATE(s))
 		return 0;
+	s->saved_bidi = s->mode & BIDI_MODES;
+	s->mode &= ~BIDI_MODES;
+
 	sx = screen_size_x(s);
 	sy = screen_size_y(s);
 
@@ -730,6 +735,9 @@ screen_alternate_off(struct screen *s, struct grid_cell *gc, int cursor)
 			s->cy = screen_size_y(s) - 1;
 		return 0;
 	}
+
+	s->mode = (s->mode & ~BIDI_MODES)|s->saved_bidi;
+	s->saved_bidi = 0;
 
 	/* Clamp cursor to the current screen size. */
 	if (s->cy > screen_size_y(s) - 1)
@@ -812,6 +820,12 @@ screen_mode_to_string(int mode)
 		strlcat(tmp, "THEME_UPDATES,", sizeof tmp);
 	if (mode & MODE_SYNC)
 		strlcat(tmp, "SYNC,", sizeof tmp);
+	if (mode & MODE_BIDI)
+		strlcat(tmp, "BIDI,", sizeof tmp);
+	if (mode & MODE_BIDI_AUTO)
+		strlcat(tmp, "BIDI_AUTO,", sizeof tmp);
+	if (mode & MODE_BIDI_RTL)
+		strlcat(tmp, "BIDI_RTL,", sizeof tmp);
 	if (*tmp != '\0')
 		tmp[strlen(tmp) - 1] = '\0';
 	return (tmp);

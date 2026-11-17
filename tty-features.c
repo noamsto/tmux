@@ -165,6 +165,22 @@ static const struct tty_feature tty_feature_usstyle = {
 	0
 };
 
+/* Terminal supports per-pane bidi with isolates. */
+static const char *const tty_feature_bidi_capabilities[] = {
+	"Enbidi=\\E[8h",
+	"Dsbidi=\\E[8l",
+	"Enbida=\\E[?2501h",
+	"Dsbida=\\E[?2501l",
+	"Enbidr=\\E[2 k",
+	"Dsbidr=\\E[0 k",
+	NULL
+};
+static const struct tty_feature tty_feature_bidi = {
+	"bidi",
+	tty_feature_bidi_capabilities,
+	0
+};
+
 /* Terminal supports bracketed paste. */
 static const char *const tty_feature_bpaste_capabilities[] = {
 	"Enbp=\\E[?2004h",
@@ -409,6 +425,7 @@ static const struct tty_feature tty_feature_utf8 = {
 static const struct tty_feature *const tty_features[] = {
 	&tty_feature_256,
 	&tty_feature_appesc,
+	&tty_feature_bidi,
 	&tty_feature_bpaste,
 	&tty_feature_ccolour,
 	&tty_feature_clipboard,

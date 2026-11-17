@@ -41,6 +41,7 @@ static int	screen_write_combine(struct screen_write_ctx *,
 static void	screen_write_sync_flush_dirty(struct window_pane *);
 static void	screen_write_sync_apply_scroll(struct screen_write_ctx *,
 		    struct tty_ctx *);
+static int	screen_write_wp_is_obscured(struct window_pane *);
 
 struct screen_write_citem {
 	u_int				x;
@@ -188,16 +189,46 @@ screen_write_set_client_cb(struct tty_ctx *ttyctx, struct client *c)
 	if (status_side_at_column(c) == 0)
 		ttyctx->xoff += status_side_size(c);
 
+	ttyctx->flags &= ~TTY_CTX_BIDI_REDRAW;
+	if ((c->tty.flags & TTY_BIDI) && screen_write_wp_is_obscured(wp))
+		ttyctx->flags |= TTY_CTX_BIDI_REDRAW;
+	tty_set_bidi_ctx(&c->tty, ttyctx);
+
 	return (1);
 }
 
 /* Return 1 if a menu or floating pane overlaps this pane. */
 static int
-screen_write_pane_is_obscured(struct screen_write_ctx *ctx)
+screen_write_wp_is_obscured(struct window_pane *wp)
 {
-	struct window_pane	*wp = ctx->wp;
+	struct window_pane	*loop = wp;
 	struct menu_data	*md;
 
+	md = wp->window->menu;
+	if (md != NULL &&
+	    (int)menu_x(md) < wp->xoff + (int)wp->sx &&
+	    (int)(menu_x(md) + menu_width(md)) > wp->xoff &&
+	    (int)menu_y(md) < wp->yoff + (int)wp->sy &&
+	    (int)(menu_y(md) + menu_height(md)) > wp->yoff)
+		return (1);
+
+	if (wp->xoff < 0 ||
+	    wp->yoff < 0 ||
+	    wp->xoff + wp->sx > wp->window->sx ||
+	    wp->yoff + wp->sy > wp->window->sy)
+		return (1);
+
+	while ((loop = TAILQ_PREV(loop, window_panes, zentry)) != NULL) {
+		if (window_pane_floating_overlaps(loop, wp))
+			return (1);
+	}
+	return (0);
+}
+
+/* Return 1 if a menu or floating pane overlaps this pane, cached. */
+static int
+screen_write_pane_is_obscured(struct screen_write_ctx *ctx)
+{
 	if (ctx->wp == NULL)
 		return (0);
 	if (ctx->flags & SCREEN_WRITE_CHECKED_IF_OBSCURED) {
@@ -207,29 +238,9 @@ screen_write_pane_is_obscured(struct screen_write_ctx *ctx)
 	}
 	ctx->flags |= SCREEN_WRITE_CHECKED_IF_OBSCURED;
 
-	md = wp->window->menu;
-	if (md != NULL &&
-	    (int)menu_x(md) < wp->xoff + (int)wp->sx &&
-	    (int)(menu_x(md) + menu_width(md)) > wp->xoff &&
-	    (int)menu_y(md) < wp->yoff + (int)wp->sy &&
-	    (int)(menu_y(md) + menu_height(md)) > wp->yoff) {
+	if (screen_write_wp_is_obscured(ctx->wp)) {
 		ctx->flags |= SCREEN_WRITE_OBSCURED;
 		return (1);
-	}
-
-	if (ctx->wp->xoff < 0 ||
-	    ctx->wp->yoff < 0 ||
-	    ctx->wp->xoff + ctx->wp->sx > ctx->wp->window->sx ||
-	    ctx->wp->yoff + ctx->wp->sy > ctx->wp->window->sy) {
-		ctx->flags |= SCREEN_WRITE_OBSCURED;
-		return (1);
-	}
-
-	while ((wp = TAILQ_PREV(wp, window_panes, zentry)) != NULL) {
-		if (window_pane_floating_overlaps(wp, ctx->wp)) {
-			ctx->flags |= SCREEN_WRITE_OBSCURED;
-			return (1);
-		}
 	}
 	return (0);
 }

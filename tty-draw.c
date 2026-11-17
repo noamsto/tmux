@@ -45,7 +45,7 @@ static const char* tty_draw_line_states[] = {
 /* Clear part of the line. */
 static void
 tty_draw_line_clear(struct tty *tty, u_int px, u_int py, u_int nx,
-    const struct grid_cell *defaults, u_int bg, int wrapped)
+    const struct grid_cell *defaults, u_int bg, int wrapped, int spaces)
 {
 	/* Nothing to clear. */
 	if (nx == 0)
@@ -63,14 +63,14 @@ tty_draw_line_clear(struct tty *tty, u_int px, u_int py, u_int nx,
 		}
 
 		/* At the start of the line. Use EL1. */
-		if (px == 0 && tty_term_has(tty->term, TTYC_EL1)) {
+		if (!spaces && px == 0 && tty_term_has(tty->term, TTYC_EL1)) {
 			tty_cursor(tty, px + nx - 1, py);
 			tty_putcode(tty, TTYC_EL1);
 			return;
 		}
 
 		/* Section of line. Use ECH if possible. */
-		if (tty_term_has(tty->term, TTYC_ECH)) {
+		if (!spaces && tty_term_has(tty->term, TTYC_ECH)) {
 			tty_cursor(tty, px, py);
 			tty_putcode_i(tty, TTYC_ECH, nx);
 			return;
@@ -125,7 +125,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	struct grid_line	*gl;
 	u_int			 i, j, last_i, cx, ex, width;
 	u_int			 cellsize, bg;
-	int			 flags, empty, wrapped = 0;
+	int			 flags, empty, wrapped = 0, spaces;
 	char			 buf[1000];
 	size_t			 len;
 	enum tty_draw_line_state current_state, next_state;
@@ -142,6 +142,13 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 		style_ctx = &default_style_ctx;
 	}
 	defaults = style_ctx->defaults;
+
+	/*
+	 * The first and last cells of an isolated pane line hold the isolate
+	 * controls, which are lost if those cells are erased rather than
+	 * written.
+	 */
+	spaces = (style_ctx->bidi & TTY_STYLE_BIDI_ISOLATE);
 
 	/*
 	 * py is the line in the screen to draw. px is the start x and nx is
@@ -216,7 +223,8 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 		}
 		tty_attributes(tty, &last, style_ctx);
 		log_debug("%s: clearing %u padding cells", __func__, cx);
-		tty_draw_line_clear(tty, atx, aty, cx, defaults, bg, 0);
+		tty_draw_line_clear(tty, atx, aty, cx, defaults, bg, 0,
+		    spaces);
 		if (cx == ex)
 			goto out;
 		atx += cx;
@@ -325,7 +333,8 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 			if (current_state == TTY_DRAW_LINE_EMPTY) {
 				tty_attributes(tty, &last, style_ctx);
 				tty_draw_line_clear(tty, atx + last_i, aty,
-				    i - last_i, defaults, last.bg, wrapped);
+				    i - last_i, defaults, last.bg, wrapped,
+				    spaces);
 				wrapped = 0;
 			} else if (next_state != TTY_DRAW_LINE_SAME &&
 			    len != 0) {

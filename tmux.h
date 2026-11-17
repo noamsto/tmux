@@ -521,6 +521,9 @@ enum tty_code_code {
 	TTYC_DIM,
 	TTYC_DL,
 	TTYC_DL1,
+	TTYC_DSBIDA,
+	TTYC_DSBIDI,
+	TTYC_DSBIDR,
 	TTYC_DSBP,
 	TTYC_DSEKS,
 	TTYC_DSESC,
@@ -532,6 +535,9 @@ enum tty_code_code {
 	TTYC_EL,
 	TTYC_EL1,
 	TTYC_ENACS,
+	TTYC_ENBIDA,
+	TTYC_ENBIDI,
+	TTYC_ENBIDR,
 	TTYC_ENBP,
 	TTYC_ENEKS,
 	TTYC_ENESC,
@@ -758,12 +764,16 @@ enum tty_code_code {
 #define MODE_KEYS_EXTENDED_2 0x40000
 #define MODE_THEME_UPDATES 0x80000
 #define MODE_SYNC 0x100000
+#define MODE_BIDI 0x200000
+#define MODE_BIDI_AUTO 0x400000
+#define MODE_BIDI_RTL 0x800000
 
 #define ALL_MODES 0xffffff
 #define ALL_MOUSE_MODES (MODE_MOUSE_STANDARD|MODE_MOUSE_BUTTON|MODE_MOUSE_ALL)
 #define MOTION_MOUSE_MODES (MODE_MOUSE_BUTTON|MODE_MOUSE_ALL)
 #define CURSOR_MODES (MODE_CURSOR|MODE_CURSOR_BLINKING|MODE_CURSOR_VERY_VISIBLE)
 #define EXTENDED_KEY_MODES (MODE_KEYS_EXTENDED|MODE_KEYS_EXTENDED_2)
+#define BIDI_MODES (MODE_BIDI|MODE_BIDI_AUTO|MODE_BIDI_RTL)
 
 /* Mouse protocol constants. */
 #define MOUSE_PARAM_MAX 0xff
@@ -1145,6 +1155,7 @@ struct screen {
 	struct grid			*saved_grid;
 	struct grid_cell		 saved_cell;
 	int				 saved_flags;
+	int				 saved_bidi;
 
 	bitstr_t			*tabs;
 	struct screen_sel		*sel;
@@ -1839,6 +1850,10 @@ struct tty_style_ctx {
 	struct colour_palette	*palette;
 	u_int			 dim;
 	struct hyperlinks	*hyperlinks;
+	int			 bidi;
+#define TTY_STYLE_BIDI_AUTO 0x1
+#define TTY_STYLE_BIDI_RTL 0x2
+#define TTY_STYLE_BIDI_ISOLATE 0x4
 };
 
 /* Maximum reported terminal size. */
@@ -1914,6 +1929,9 @@ struct tty {
 #define TTY_HAVEKITTYGRAPHICS 0x20000
 #define TTY_WINSZPIXELS 0x40000
 #define TTY_WINSZAPPLY 0x80000
+#define TTY_BIDI 0x100000
+#define TTY_BIDIAUTO 0x200000
+#define TTY_BIDIRTL 0x400000
 #define TTY_ALL_REQUEST_FLAGS \
 	(TTY_HAVEDA|TTY_HAVEDA2|TTY_HAVEXDA|TTY_HAVESYNC|TTY_HAVEKITTYGRAPHICS)
 	int		 flags;
@@ -1967,6 +1985,7 @@ struct tty_ctx {
 #define TTY_CTX_SYNC 0x8
 #define TTY_CTX_CELL_INVALIDATE 0x20
 #define TTY_CTX_PANE_OBSCURED 0x40
+#define TTY_CTX_BIDI_REDRAW 0x80
 
 	union {
 		u_int			 n;
@@ -3081,6 +3100,13 @@ int	tty_open(struct tty *, char **);
 void	tty_close(struct tty *);
 void	tty_free(struct tty *);
 void	tty_update_features(struct tty *);
+int	tty_has_bidi(struct tty *);
+int	tty_pane_bidi(struct window_pane *);
+void	tty_set_bidi(struct tty *, int);
+void	tty_set_bidi_ctx(struct tty *, struct tty_ctx *);
+void	tty_bidi_isolate(struct tty *, int, u_int, u_int);
+void	tty_bidi_close(struct tty *, struct screen *, u_int, u_int, u_int,
+	    u_int, u_int);
 void	tty_set_selection(struct tty *, const char *, const char *, size_t);
 void	tty_write(void (*)(struct tty *, const struct tty_ctx *),
 	    struct tty_ctx *);
