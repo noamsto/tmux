@@ -724,6 +724,22 @@ tty_bidi_isolate(struct tty *tty, int bits, u_int x, u_int y)
 	tty_putn(tty, s, 3, 0);
 }
 
+/* Does this cell hold an isolate control? */
+static int
+tty_bidi_has_control(const struct utf8_data *ud)
+{
+	u_int	i;
+
+	for (i = 0; i + 2 < ud->size; i++) {
+		if (ud->data[i] == 0xe2 &&
+		    ud->data[i + 1] == 0x81 &&
+		    ud->data[i + 2] >= 0xa6 &&
+		    ud->data[i + 2] <= 0xa9)
+			return (1);
+	}
+	return (0);
+}
+
 /*
  * Count the isolates the pane's own text leaves open in cells px to px + nx - 1
  * of line py. Also return the cell after the last non-blank one, the number
@@ -766,17 +782,18 @@ tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int *last,
 }
 
 /*
- * Should the pane's own isolate controls in these cells be kept? Too many
- * make the terminal ignore every isolate on the line and an unmatched PDI
- * would close the one around the pane, so then they are all dropped.
+ * Should the pane's own isolate controls in these cells be kept? Too many,
+ * counting the PDIs added to close them, make the terminal ignore every
+ * isolate on the line and an unmatched PDI would close the one around the
+ * pane, so then they are all dropped.
  */
 int
 tty_bidi_keep(struct screen *s, u_int px, u_int py, u_int nx)
 {
-	u_int	last, controls, unmatched;
+	u_int	last, controls, unmatched, depth;
 
-	tty_bidi_scan(s, px, py, nx, &last, &controls, &unmatched);
-	return (controls <= 2 && unmatched == 0);
+	depth = tty_bidi_scan(s, px, py, nx, &last, &controls, &unmatched);
+	return (controls + depth <= 2 && unmatched == 0);
 }
 
 /*
@@ -793,7 +810,7 @@ tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
 	if (s != NULL) {
 		depth = tty_bidi_scan(s, px, py, nx, &last, &controls,
 		    &unmatched);
-		if (controls > 2 || unmatched != 0)
+		if (controls + depth > 2 || unmatched != 0)
 			depth = 0;
 	}
 
@@ -2254,6 +2271,16 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 {
 	if (!tty_is_visible(tty, ctx, ctx->ocx, ctx->ocy, 1, 1))
 		return;
+
+	/*
+	 * A combined cell too long for the grid may hold isolate controls the
+	 * grid does not, so draw the line from the grid instead.
+	 */
+	if ((ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) &&
+	    tty_bidi_has_control(&ctx->cell->data)) {
+		tty_draw_pane(tty, ctx, ctx->ocy);
+		return;
+	}
 
 	if (ctx->xoff + ctx->ocx - ctx->wox > tty->sx - 1 &&
 	    ctx->ocy == ctx->orlower &&

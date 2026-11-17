@@ -1409,11 +1409,12 @@ redraw_find_span(struct redraw_line *line, u_int x)
 /*
  * Write the isolate controls held by the cells of a span that was just drawn:
  * its own initiator if it starts at column 0 (there is no cell to its left),
- * its PDIs in its last cell, then the initiator of the span to its right.
+ * its PDIs in its last cell, then the initiator of the span to its right. A
+ * pane span drawn from a prompt screen instead of its own passes that screen.
  */
 static void
 redraw_bidi_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
-    u_int y, int own)
+    u_int y, struct screen *prompt)
 {
 	struct redraw_scene	*scene = dctx->scene;
 	struct client		*c = scene->c;
@@ -1432,7 +1433,10 @@ redraw_bidi_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 		if (x0 == 0)
 			tty_bidi_isolate(tty, bits, 1, y);
 		if (x1 < tty->sx) {
-			if (own) {
+			if (prompt != NULL) {
+				s = prompt;
+				px = span->data.p.px;
+			} else {
 				switch (span->data.type) {
 				case REDRAW_SPAN_PANE:
 					s = span->data.p.wp->screen;
@@ -1822,7 +1826,7 @@ redraw_draw_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 	}
 
 	if (written && phase == REDRAW_TEXT && (dctx->flags & REDRAW_BIDI)) {
-		redraw_bidi_span(dctx, span, y, 1);
+		redraw_bidi_span(dctx, span, y, NULL);
 	}
 }
 
@@ -2139,14 +2143,14 @@ redraw_draw_pane_prompt(struct redraw_draw_ctx *dctx, struct window_pane *wp)
 	redraw_make_pane_prompt(wp, &screen);
 	sc = redraw_bidi_style(&style_ctx, &screen, bidi);
 	tty_draw_line(tty, &screen, offset, 0, width, side_left + px, cy, sc);
-	screen_free(&screen);
 
 	if (dctx->flags & REDRAW_BIDI) {
 		TAILQ_FOREACH(span, spans, entry) {
 			if (span->data.p.wp == wp)
-				redraw_bidi_span(dctx, span, cy, 0);
+				redraw_bidi_span(dctx, span, cy, &screen);
 		}
 	}
+	screen_free(&screen);
 }
 
 /* Write the isolate controls for a side status line that was just drawn. */
@@ -2491,7 +2495,7 @@ redraw_damage_draw_pane_prompt(struct redraw_draw_ctx *dctx,
 		    redraw_bidi_get(dctx, span));
 		tty_draw_line(tty, &screen, px, 0, width, x, y, sc);
 		if (dctx->flags & REDRAW_BIDI)
-			redraw_bidi_span(dctx, span, y, 0);
+			redraw_bidi_span(dctx, span, y, &screen);
 	}
 	screen_free(&screen);
 }

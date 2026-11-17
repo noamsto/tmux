@@ -42,7 +42,7 @@ static void	screen_write_sync_flush_dirty(struct window_pane *);
 static void	screen_write_sync_apply_scroll(struct screen_write_ctx *,
 		    struct tty_ctx *);
 static int	screen_write_wp_is_obscured(struct window_pane *);
-static int	screen_write_wp_menu_right(struct window_pane *);
+static int	screen_write_wp_isolate_right(struct window_pane *);
 
 struct screen_write_citem {
 	u_int				x;
@@ -192,7 +192,8 @@ screen_write_set_client_cb(struct tty_ctx *ttyctx, struct client *c)
 
 	ttyctx->flags &= ~TTY_CTX_BIDI_REDRAW;
 	if ((c->tty.flags & TTY_BIDI) &&
-	    (screen_write_wp_is_obscured(wp) || screen_write_wp_menu_right(wp)))
+	    (screen_write_wp_is_obscured(wp) ||
+	    screen_write_wp_isolate_right(wp)))
 		ttyctx->flags |= TTY_CTX_BIDI_REDRAW;
 	tty_set_bidi_ctx(&c->tty, ttyctx);
 
@@ -228,18 +229,37 @@ screen_write_wp_is_obscured(struct window_pane *wp)
 }
 
 /*
- * Return 1 if a menu starts in the column after this pane. Its isolate
- * initiator is held by the pane's last cell.
+ * Return 1 if an isolated segment may start in the column after this pane, so
+ * its isolate initiator is held by the pane's last cell: a menu, a floating
+ * pane, or any pane if this is a floating pane with no border.
  */
 static int
-screen_write_wp_menu_right(struct window_pane *wp)
+screen_write_wp_isolate_right(struct window_pane *wp)
 {
 	struct menu_data	*md = wp->window->menu;
+	struct window_pane	*loop;
+	int			 x = wp->xoff + wp->sx;
 
-	return (md != NULL &&
-	    (int)menu_x(md) == wp->xoff + (int)wp->sx &&
+	if (md != NULL &&
+	    (int)menu_x(md) == x &&
 	    (int)menu_y(md) < wp->yoff + (int)wp->sy &&
-	    (int)(menu_y(md) + menu_height(md)) > wp->yoff);
+	    (int)(menu_y(md) + menu_height(md)) > wp->yoff)
+		return (1);
+
+	TAILQ_FOREACH(loop, &wp->window->panes, entry) {
+		if (loop == wp || !window_pane_is_visible(loop))
+			continue;
+		if (!window_pane_is_floating(loop) &&
+		    (!window_pane_is_floating(wp) ||
+		    window_pane_get_pane_lines(wp) != PANE_LINES_NONE))
+			continue;
+		if (loop->xoff <= x &&
+		    loop->xoff + (int)loop->sx > x &&
+		    loop->yoff < wp->yoff + (int)wp->sy &&
+		    loop->yoff + (int)loop->sy > wp->yoff)
+			return (1);
+	}
+	return (0);
 }
 
 /* Return 1 if a menu or floating pane overlaps this pane, cached. */
