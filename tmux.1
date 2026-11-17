@@ -5258,6 +5258,9 @@ Supports 256 colours with the SGR escape sequences.
 .It appesc
 Supports application escape key mode, where the Escape key sends a sequence
 that cannot be mistaken for the start of another key.
+.It bidi
+Supports per-pane bidirectional text: panes are wrapped in Unicode
+isolates and the terminal's bidi modes are set while a pane uses them.
 .It clipboard
 Allows setting the system clipboard.
 .It ccolour
@@ -9131,6 +9134,12 @@ Set, clear, disable or enable DECSLRM margins.
 These are set automatically if the terminal reports it is
 .Em VT420
 compatible.
+.It Em \&Dsbida , \&Enbida
+Disable and enable automatic detection of the paragraph direction.
+.It Em \&Dsbidi , \&Enbidi
+Disable and enable the terminal's implicit bidirectional mode.
+.It Em \&Dsbidr , \&Enbidr
+Set the paragraph direction to left-to-right and right-to-left.
 .It Em \&Dsbp , \&Enbp
 Disable and enable bracketed paste.
 These are set automatically if the

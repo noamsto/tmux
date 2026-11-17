@@ -179,6 +179,7 @@ static void	input_osc_111(struct input_ctx *, const char *);
 static void	input_osc_112(struct input_ctx *, const char *);
 static void	input_osc_133(struct input_ctx *, const char *);
 static void	input_osc_7501(struct input_ctx *, const char *);
+static void	input_bidi_changed(struct window_pane *, int);
 
 /* Transition entry/exit handlers. */
 static void	input_clear(struct input_ctx *);
@@ -293,6 +294,7 @@ enum input_csi_type {
 	INPUT_CSI_RM,
 	INPUT_CSI_RM_PRIVATE,
 	INPUT_CSI_SCP,
+	INPUT_CSI_SCPD,
 	INPUT_CSI_SD,
 	INPUT_CSI_SGR,
 	INPUT_CSI_SM,
@@ -335,6 +337,7 @@ static const struct input_table_entry input_csi_table[] = {
 	{ 'g', "",  INPUT_CSI_TBC },
 	{ 'h', "",  INPUT_CSI_SM },
 	{ 'h', "?", INPUT_CSI_SM_PRIVATE },
+	{ 'k', " ", INPUT_CSI_SCPD },
 	{ 'l', "",  INPUT_CSI_RM },
 	{ 'l', "?", INPUT_CSI_RM_PRIVATE },
 	{ 'm', "",  INPUT_CSI_SGR },
@@ -1044,12 +1047,38 @@ input_parse_pane(struct window_pane *wp)
 	window_pane_update_used_data(wp, &wp->offset, new_size);
 }
 
+/* Redraw bidi-capable clients showing a pane whose bidi modes changed. */
+static void
+input_bidi_changed(struct window_pane *wp, int old)
+{
+	struct client	*c;
+	int		 new = wp->base.mode & BIDI_MODES;
+
+	if (((old ^ new) & MODE_BIDI) == 0 &&
+	    ((~new & MODE_BIDI) ||
+	    ((old ^ new) & (MODE_BIDI_AUTO|MODE_BIDI_RTL)) == 0))
+		return;
+	if (!window_pane_is_visible(wp))
+		return;
+	log_debug("%s: %%%u bidi modes 0x%x -> 0x%x", __func__, wp->id, old,
+	    new);
+
+	TAILQ_FOREACH(c, &clients, entry) {
+		if (c->session == NULL || c->session->curw == NULL ||
+		    c->session->curw->window != wp->window ||
+		    !tty_has_bidi(&c->tty))
+			continue;
+		c->flags |= CLIENT_REDRAWWINDOW;
+	}
+}
+
 /* Parse given input. */
 void
 input_parse_buffer(struct window_pane *wp, const u_char *buf, size_t len)
 {
 	struct input_ctx	*ictx = wp->ictx;
 	struct screen_write_ctx	*sctx = &ictx->ctx;
+	int			 old;
 
 	if (len == 0)
 		return;
@@ -1076,8 +1105,11 @@ input_parse_buffer(struct window_pane *wp, const u_char *buf, size_t len)
 	log_debug("%s: %%%u %s, %zu bytes: %.*s", __func__, wp->id,
 	    ictx->state->name, len, (int)len, buf);
 
+	old = wp->base.mode & BIDI_MODES;
 	input_parse(ictx, buf, len);
 	screen_write_stop(sctx);
+	if ((wp->base.mode & BIDI_MODES) != old)
+		input_bidi_changed(wp, old);
 }
 
 /* Parse given input for screen. */
@@ -1663,6 +1695,9 @@ input_csi_dispatch(struct input_ctx *ictx)
 		case 4:		/* IRM */
 			n = (s->mode & MODE_INSERT) ? 1 : 2;
 			break;
+		case 8:		/* BDSM */
+			n = (s->mode & MODE_BIDI) ? 1 : 2;
+			break;
 		default:
 			n = 0;
 			break;
@@ -1734,6 +1769,9 @@ input_csi_dispatch(struct input_ctx *ictx)
 			break;
 		case 2031:	/* theme update notifications */
 			n = (s->mode & MODE_THEME_UPDATES) ? 1 : 2;
+			break;
+		case 2501:	/* bidi auto-detect */
+			n = (s->mode & MODE_BIDI_AUTO) ? 1 : 2;
 			break;
 		default:
 			n = 0;
@@ -1853,6 +1891,22 @@ input_csi_dispatch(struct input_ctx *ictx)
 	case INPUT_CSI_SCP:
 		input_save_state(ictx);
 		break;
+	case INPUT_CSI_SCPD:
+		switch (input_get(ictx, 0, 0, 0)) {
+		case -1:
+			break;
+		case 0:
+		case 1:
+			screen_write_mode_clear(sctx, MODE_BIDI_RTL);
+			break;
+		case 2:
+			screen_write_mode_set(sctx, MODE_BIDI_RTL);
+			break;
+		default:
+			log_debug("%s: unknown '%c'", __func__, ictx->ch);
+			break;
+		}
+		break;
 	case INPUT_CSI_SGR:
 		input_csi_dispatch_sgr(ictx);
 		break;
@@ -1934,6 +1988,9 @@ input_csi_dispatch_rm(struct input_ctx *ictx)
 		case 4:		/* IRM */
 			screen_write_mode_clear(sctx, MODE_INSERT);
 			break;
+		case 8:		/* BDSM */
+			screen_write_mode_clear(sctx, MODE_BIDI);
+			break;
 		case 34:
 			screen_write_mode_set(sctx, MODE_CURSOR_VERY_VISIBLE);
 			break;
@@ -2005,6 +2062,9 @@ input_csi_dispatch_rm_private(struct input_ctx *ictx)
 		case 2026:
 			screen_write_end_sync(sctx);
 			break;
+		case 2501:
+			screen_write_mode_clear(sctx, MODE_BIDI_AUTO);
+			break;
 		case 2031:
 			screen_write_mode_clear(sctx, MODE_THEME_UPDATES);
 			if (ictx->wp != NULL)
@@ -2030,6 +2090,9 @@ input_csi_dispatch_sm(struct input_ctx *ictx)
 			break;
 		case 4:		/* IRM */
 			screen_write_mode_set(sctx, MODE_INSERT);
+			break;
+		case 8:		/* BDSM */
+			screen_write_mode_set(sctx, MODE_BIDI);
 			break;
 		case 34:
 			screen_write_mode_clear(sctx, MODE_CURSOR_VERY_VISIBLE);
@@ -2115,6 +2178,9 @@ input_csi_dispatch_sm_private(struct input_ctx *ictx)
 			break;
 		case 2026:
 			screen_write_start_sync(wp);
+			break;
+		case 2501:
+			screen_write_mode_set(sctx, MODE_BIDI_AUTO);
 			break;
 		default:
 			log_debug("%s: unknown '%c'", __func__, ictx->ch);

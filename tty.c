@@ -83,7 +83,7 @@ static void	tty_draw_pane(struct tty *, const struct tty_ctx *, u_int);
 #define TTY_REQUEST_LIMIT 30
 
 static struct tty_style_ctx tty_default_style_ctx = {
-	&grid_default_cell, NULL, 0, NULL
+	&grid_default_cell, NULL, 0, NULL, 0
 };
 
 void
@@ -389,6 +389,15 @@ tty_start_tty(struct tty *tty)
 		} else
 			tty_putcode(tty, TTYC_CLEAR);
 	}
+	tty->flags &= ~(TTY_BIDI|TTY_BIDIAUTO|TTY_BIDIRTL);
+	if (!options_get_number(global_options, "clear-on-attach") &&
+	    tty_has_bidi(tty)) {
+		/*
+		 * Without SMCUP the terminal keeps its bidi modes, so make the
+		 * first redraw set them.
+		 */
+		tty->flags |= TTY_BIDI;
+	}
 	tty_putcode(tty, TTYC_SMKX);
 
 	if (tty_acs_needed(tty)) {
@@ -548,6 +557,12 @@ tty_stop_tty(struct tty *tty)
 
 	if (tty_use_margin(tty))
 		tty_raw(tty, tty_term_string(tty->term, TTYC_DSMG));
+	if (tty->flags & TTY_BIDI) {
+		tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDA));
+		tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDR));
+		tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDI));
+		tty->flags &= ~(TTY_BIDI|TTY_BIDIAUTO|TTY_BIDIRTL);
+	}
 	if (options_get_number(global_options, "clear-on-attach"))
 		tty_raw(tty, tty_term_string(tty->term, TTYC_RMCUP));
 	else
@@ -617,6 +632,224 @@ tty_update_features(struct tty *tty)
 	if (changed) {
 		server_redraw_client(c);
 		tty_invalidate(tty);
+	}
+}
+
+/* Does this terminal want per-pane bidi? */
+int
+tty_has_bidi(struct tty *tty)
+{
+	return ((tty->client->flags & CLIENT_UTF8) &&
+	    tty_term_has(tty->term, TTYC_ENBIDI));
+}
+
+/* Get the bidi style flags for a pane. */
+int
+tty_pane_bidi(struct window_pane *wp)
+{
+	int	mode = wp->base.mode;
+
+	if (~mode & MODE_BIDI)
+		return (0);
+	if (mode & MODE_BIDI_AUTO)
+		return (TTY_STYLE_BIDI_AUTO);
+	if (mode & MODE_BIDI_RTL)
+		return (TTY_STYLE_BIDI_RTL);
+	return (0);
+}
+
+/*
+ * Turn bidi on or off. The clear makes the terminal forget the bidi state it
+ * stored for each line.
+ */
+void
+tty_set_bidi(struct tty *tty, int on)
+{
+	if (!tty_has_bidi(tty))
+		return;
+	if (!on && (~tty->flags & TTY_BIDI))
+		return;
+
+	tty_reset(tty);
+	if (on)
+		tty_putcode(tty, TTYC_ENBIDI);
+	else
+		tty_putcode(tty, TTYC_DSBIDI);
+	tty_putcode(tty, TTYC_DSBIDA);
+	tty_putcode(tty, TTYC_DSBIDR);
+	if (on)
+		tty->flags |= TTY_BIDI;
+	else
+		tty->flags &= ~TTY_BIDI;
+	tty->flags &= ~(TTY_BIDIAUTO|TTY_BIDIRTL);
+
+	tty_putcode(tty, TTYC_CLEAR);
+	tty->cx = tty->cy = UINT_MAX;
+	log_debug("%s: bidi %s", tty->client->name, on ? "on" : "off");
+}
+
+/* Set the bidi style flags for a pane for this terminal. */
+void
+tty_set_bidi_ctx(struct tty *tty, struct tty_ctx *ctx)
+{
+	struct window_pane	*wp = ctx->arg;
+	int			 bits;
+
+	ctx->style_ctx.bidi = 0;
+	if ((~tty->flags & TTY_BIDI) || wp == NULL)
+		return;
+
+	bits = tty_pane_bidi(wp);
+	if (!tty_full_width(tty, ctx))
+		bits |= TTY_STYLE_BIDI_ISOLATE;
+	ctx->style_ctx.bidi = bits;
+}
+
+/*
+ * Write an isolate initiator. It is stored in the cell left of the cursor, so
+ * it is written with no width.
+ */
+void
+tty_bidi_isolate(struct tty *tty, int bits, u_int x, u_int y)
+{
+	const char	*s;
+
+	if (bits & TTY_STYLE_BIDI_AUTO)
+		s = "\342\201\250"; /* FSI */
+	else if (bits & TTY_STYLE_BIDI_RTL)
+		s = "\342\201\247"; /* RLI */
+	else
+		s = "\342\201\246"; /* LRI */
+	tty_cursor(tty, x, y);
+	tty_putn(tty, s, 3, 0);
+}
+
+/* Does this cell hold an isolate control? */
+static int
+tty_bidi_has_control(const struct utf8_data *ud)
+{
+	u_int	i;
+
+	for (i = 0; i + 2 < ud->size; i++) {
+		if (ud->data[i] == 0xe2 &&
+		    ud->data[i + 1] == 0x81 &&
+		    ud->data[i + 2] >= 0xa6 &&
+		    ud->data[i + 2] <= 0xa9)
+			return (1);
+	}
+	return (0);
+}
+
+/*
+ * Count the isolates the pane's own text leaves open in cells px to px + nx - 1
+ * of line py. Also return the cell after the last non-blank one, the number
+ * of isolate controls seen and the number of PDIs with no initiator.
+ */
+static u_int
+tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int *last,
+    u_int *controls, u_int *unmatched)
+{
+	struct grid_cell	 gc;
+	const u_char		*cp;
+	u_int			 i, j, depth = 0;
+
+	*last = 0;
+	*controls = 0;
+	*unmatched = 0;
+	for (i = px; i < px + nx; i++) {
+		grid_view_get_cell(s->grid, i, py, &gc);
+		if ((gc.flags & GRID_FLAG_PADDING) ||
+		    gc.data.size != 1 ||
+		    gc.data.data[0] != ' ')
+			*last = i - px + 1;
+		cp = gc.data.data;
+		for (j = 0; j + 2 < gc.data.size; j++) {
+			if (cp[j] != 0xe2 || cp[j + 1] != 0x81)
+				continue;
+			if (cp[j + 2] >= 0xa6 && cp[j + 2] <= 0xa8) {
+				depth++;
+				(*controls)++;
+			} else if (cp[j + 2] == 0xa9) {
+				if (depth > 0)
+					depth--;
+				else
+					(*unmatched)++;
+				(*controls)++;
+			}
+		}
+	}
+	return (depth);
+}
+
+/*
+ * Should the pane's own isolate controls in these cells be kept? Too many,
+ * counting the PDIs added to close them, make the terminal ignore every
+ * isolate on the line and an unmatched PDI would close the one around the
+ * pane, so then they are all dropped.
+ */
+int
+tty_bidi_keep(struct screen *s, u_int px, u_int py, u_int nx)
+{
+	u_int	last, controls, unmatched, depth;
+
+	depth = tty_bidi_scan(s, px, py, nx, &last, &controls, &unmatched);
+	return (controls + depth <= 2 && unmatched == 0);
+}
+
+/*
+ * Close an isolate at x,y, including any isolates the pane's own text in the
+ * given cells left open. Those are closed right after the last non-blank cell,
+ * so trailing blanks stay outside them as they would without the isolate.
+ */
+void
+tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
+    u_int nx, u_int x, u_int y)
+{
+	u_int	i, last = nx, controls, unmatched, depth = 0;
+
+	if (s != NULL) {
+		depth = tty_bidi_scan(s, px, py, nx, &last, &controls,
+		    &unmatched);
+		if (controls + depth > 2 || unmatched != 0)
+			depth = 0;
+	}
+
+	if (depth > 0) {
+		tty_cursor(tty, x - nx + last, y);
+		for (i = 0; i < depth; i++)
+			tty_putn(tty, "\342\201\251", 3, 0); /* PDI */
+	}
+	tty_cursor(tty, x, y);
+	tty_putn(tty, "\342\201\251", 3, 0); /* PDI */
+}
+
+/* Set the outer paragraph controls if bidi is on. */
+static void
+tty_bidi_paragraph(struct tty *tty, int bits)
+{
+	if (~tty->flags & TTY_BIDI)
+		return;
+	if (bits & TTY_STYLE_BIDI_ISOLATE)
+		bits = 0;
+
+	if (bits & TTY_STYLE_BIDI_AUTO) {
+		if (~tty->flags & TTY_BIDIAUTO) {
+			tty_putcode(tty, TTYC_ENBIDA);
+			tty->flags |= TTY_BIDIAUTO;
+		}
+	} else if (tty->flags & TTY_BIDIAUTO) {
+		tty_putcode(tty, TTYC_DSBIDA);
+		tty->flags &= ~TTY_BIDIAUTO;
+	}
+
+	if (bits & TTY_STYLE_BIDI_RTL) {
+		if (~tty->flags & TTY_BIDIRTL) {
+			tty_putcode(tty, TTYC_ENBIDR);
+			tty->flags |= TTY_BIDIRTL;
+		}
+	} else if (tty->flags & TTY_BIDIRTL) {
+		tty_putcode(tty, TTYC_DSBIDR);
+		tty->flags &= ~TTY_BIDIRTL;
 	}
 }
 
@@ -1297,6 +1530,10 @@ tty_clear_pane_line(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 
 	log_debug("%s: %s, %u at %u,%u", __func__, c->name, nx, px, py);
 
+	if (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) {
+		tty_draw_pane(tty, ctx, py);
+		return;
+	}
 	if (tty_clamp_line(tty, ctx, px, py, nx, &l, &x, &rx, &ry))
 		tty_clear_line(tty, &ctx->defaults, ry, x, rx, bg);
 }
@@ -1447,8 +1684,41 @@ tty_clear_pane_area(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 {
 	u_int	i, j, x, y, rx, ry;
 
+	if (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) {
+		for (j = py; j < py + ny; j++)
+			tty_draw_pane(tty, ctx, j);
+		return;
+	}
 	if (tty_clamp_area(tty, ctx, px, py, nx, ny, &i, &j, &x, &y, &rx, &ry))
 		tty_clear_area(tty, ctx, y, ry, x, rx, bg);
+}
+
+/*
+ * Rewrite the isolate controls for a pane line after cells px to px + nx - 1
+ * were written. An initiator at column 0 goes after the first cell because
+ * there is no cell left of column 0 to hold it.
+ */
+static void
+tty_bidi_line(struct tty *tty, const struct tty_ctx *ctx, u_int py, u_int px,
+    u_int nx)
+{
+	int	bits = ctx->style_ctx.bidi;
+	u_int	i, x, rx, ry;
+
+	if (~bits & TTY_STYLE_BIDI_ISOLATE)
+		return;
+	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
+		return;
+
+	if (x == 0 && px <= i && px + nx > i)
+		tty_bidi_isolate(tty, bits, 1, ry);
+	if (x + rx < tty->sx && px < i + rx && px + nx >= i + rx) {
+		tty_bidi_close(tty, ctx->s, i, py, rx, x + rx, ry);
+		if (status_side_at_column(tty->client) > 0 &&
+		    (u_int)status_side_at_column(tty->client) == x + rx)
+			tty_bidi_isolate(tty, TTY_STYLE_BIDI_ISOLATE, x + rx,
+			    ry);
+	}
 }
 
 /* Redraw a line of a screen at py. */
@@ -1463,10 +1733,36 @@ tty_draw_pane(struct tty *tty, const struct tty_ctx *ctx, u_int py)
 	if (~ctx->flags & TTY_CTX_WINDOW_BIGGER) {
 		tty_draw_line(tty, s, 0, py, nx, ctx->xoff, ctx->yoff + py,
 		    &ctx->style_ctx);
+		tty_bidi_line(tty, ctx, py, 0, nx);
 		return;
 	}
-	if (tty_clamp_line(tty, ctx, 0, py, nx, &i, &x, &rx, &ry))
+	if (tty_clamp_line(tty, ctx, 0, py, nx, &i, &x, &rx, &ry)) {
 		tty_draw_line(tty, s, i, py, rx, x, ry, &ctx->style_ctx);
+		tty_bidi_line(tty, ctx, py, 0, nx);
+	}
+}
+
+/*
+ * Fix the isolate controls after a partial write. A line holding isolate
+ * controls of its own is redrawn whole because the controls closing them follow
+ * the last non-blank cell, which moves as text is written.
+ */
+static void
+tty_bidi_partial(struct tty *tty, const struct tty_ctx *ctx, u_int py,
+    u_int px, u_int nx)
+{
+	u_int	i, x, rx, ry, last, controls, unmatched;
+
+	if (~ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE)
+		return;
+	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
+		return;
+
+	tty_bidi_scan(ctx->s, i, py, rx, &last, &controls, &unmatched);
+	if (controls != 0)
+		tty_draw_pane(tty, ctx, py);
+	else
+		tty_bidi_line(tty, ctx, py, px, nx);
 }
 
 void
@@ -1475,9 +1771,11 @@ tty_cmd_redrawline(struct tty *tty, const struct tty_ctx *ctx)
 	u_int			 i, x, rx, ry;
 
 	if (tty_clamp_line(tty, ctx, ctx->ocx, ctx->ocy, ctx->n,
-	    &i, &x, &rx, &ry))
+	    &i, &x, &rx, &ry)) {
 		tty_draw_line(tty, ctx->s, ctx->ocx + i, ctx->ocy, rx, x, ry,
 		    &ctx->style_ctx);
+		tty_bidi_partial(tty, ctx, ctx->ocy, ctx->ocx, ctx->n);
+	}
 }
 
 /* Check if character needs to be mapped for codeset. */
@@ -1583,6 +1881,13 @@ tty_write(void (*cmdfn)(struct tty *, const struct tty_ctx *),
 				break;
 			if (state == 0)
 				continue;
+			if ((ctx->flags & TTY_CTX_BIDI_REDRAW) &&
+			    cmdfn != tty_cmd_rawstring &&
+			    cmdfn != tty_cmd_setselection &&
+			    cmdfn != tty_cmd_syncstart) {
+				ctx->redraw_cb(ctx, 0, ctx->sy);
+				continue;
+			}
 			cmdfn(&c->tty, ctx);
 		}
 	}
@@ -1716,6 +2021,7 @@ tty_cmd_reverseindex(struct tty *tty, const struct tty_ctx *ctx)
 
 	if ((ctx->flags & TTY_CTX_WINDOW_BIGGER) ||
 	    (!tty_full_width(tty, ctx) && !tty_use_margin(tty)) ||
+	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) ||
 	    tty_fake_bce(tty, &ctx->defaults, 8) ||
 	    !tty_term_has(tty->term, TTYC_CSR) ||
 	    (!tty_term_has(tty->term, TTYC_RI) &&
@@ -1752,6 +2058,7 @@ tty_cmd_linefeed(struct tty *tty, const struct tty_ctx *ctx)
 
 	if ((ctx->flags & TTY_CTX_WINDOW_BIGGER) ||
 	    (!tty_full_width(tty, ctx) && !tty_use_margin(tty)) ||
+	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) ||
 	    tty_fake_bce(tty, &ctx->defaults, 8) ||
 	    !tty_term_has(tty->term, TTYC_CSR) ||
 	    ctx->sx == 1 ||
@@ -1796,6 +2103,7 @@ tty_cmd_scrollup(struct tty *tty, const struct tty_ctx *ctx)
 
 	if ((ctx->flags & TTY_CTX_WINDOW_BIGGER) ||
 	    (!tty_full_width(tty, ctx) && !tty_use_margin(tty)) ||
+	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) ||
 	    tty_fake_bce(tty, &ctx->defaults, 8) ||
 	    !tty_term_has(tty->term, TTYC_CSR) ||
 	    ctx->sx == 1 ||
@@ -1838,6 +2146,7 @@ tty_cmd_scrolldown(struct tty *tty, const struct tty_ctx *ctx)
 
 	if ((ctx->flags & TTY_CTX_WINDOW_BIGGER) ||
 	    (!tty_full_width(tty, ctx) && !tty_use_margin(tty)) ||
+	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) ||
 	    tty_fake_bce(tty, &ctx->defaults, 8) ||
 	    !tty_term_has(tty->term, TTYC_CSR) ||
 	    (!tty_term_has(tty->term, TTYC_RI) &&
@@ -1953,6 +2262,7 @@ tty_cmd_alignmenttest(struct tty *tty, const struct tty_ctx *ctx)
 		tty_cursor_pane(tty, ctx, 0, j);
 		for (i = 0; i < ctx->sx; i++)
 			tty_putc(tty, 'E');
+		tty_bidi_line(tty, ctx, j, 0, ctx->sx);
 	}
 }
 
@@ -1961,6 +2271,16 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 {
 	if (!tty_is_visible(tty, ctx, ctx->ocx, ctx->ocy, 1, 1))
 		return;
+
+	/*
+	 * A combined cell too long for the grid may hold isolate controls the
+	 * grid does not, so draw the line from the grid instead.
+	 */
+	if ((ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) &&
+	    tty_bidi_has_control(&ctx->cell->data)) {
+		tty_draw_pane(tty, ctx, ctx->ocy);
+		return;
+	}
 
 	if (ctx->xoff + ctx->ocx - ctx->wox > tty->sx - 1 &&
 	    ctx->ocy == ctx->orlower &&
@@ -1976,6 +2296,8 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 
 	if (ctx->flags & TTY_CTX_CELL_INVALIDATE)
 		tty_invalidate(tty);
+	tty_bidi_partial(tty, ctx, ctx->ocy, ctx->ocx,
+	    ctx->cell->data.width);
 }
 
 void
@@ -2007,6 +2329,7 @@ tty_cmd_cells(struct tty *tty, const struct tty_ctx *ctx)
 	tty_cursor_pane_unless_wrap(tty, ctx, ctx->ocx, ctx->ocy);
 	tty_attributes(tty, ctx->cell, &ctx->style_ctx);
 	tty_putn(tty, cp, n, n);
+	tty_bidi_partial(tty, ctx, ctx->ocy, ctx->ocx, n);
 }
 
 void
@@ -2474,6 +2797,7 @@ tty_attributes(struct tty *tty, const struct grid_cell *gc,
 	if (style_ctx == NULL)
 		style_ctx = &tty_default_style_ctx;
 	palette = style_ctx->palette;
+	tty_bidi_paragraph(tty, style_ctx->bidi);
 
 	/* Copy cell and update default colours. */
 	memcpy(&gc2, gc, sizeof gc2);
