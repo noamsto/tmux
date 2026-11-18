@@ -59,7 +59,8 @@ check 4 "\033[8h\033[5;1H${PDI}\r\nx" 5 "x"
 
 # A first cell that is wide, or not one tmux and the terminal are known to size
 # alike (a narrow cell outside the agreed list, a VS16 that widens the cell the
-# control already leads), does not keep the control.
+# control already leads), or a line drawing cell, which goes through the line
+# drawing set one byte at a time, does not keep the control.
 check 5 "\033[8h${PDI}漢abc" 1 "漢abc"
 check 6 "\033[8h${LRI}${SUN}${VS16}abc" 1 "${SUN}${VS16}abc"
 check 13 "\033[8h${PDI}☝abc" 1 "☝abc"
