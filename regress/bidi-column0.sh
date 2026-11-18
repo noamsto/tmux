@@ -2,8 +2,9 @@
 
 # Test that a pane in BDSM (SM 8) keeps a directional isolate control (U+2066
 # .. U+2069) printed at column 0, and drops it again when the text moves to
-# another row or the screen scrolls. Without BDSM the control is dropped as
-# upstream does.
+# another row or the screen scrolls. A first cell that is wide, or not one tmux
+# and the terminal are known to size alike, does not keep the control. Without
+# BDSM the control is dropped as upstream does.
 
 PATH=/bin:/usr/bin
 TERM=screen
@@ -56,10 +57,17 @@ check 2 "${PDI}abc" 1 "abc"
 check 3 "\033[8h${LRI}\r\nx" 1,2 "\nx"
 check 4 "\033[8h\033[5;1H${PDI}\r\nx" 5 "x"
 
-# A wide first cell does not keep the control; a VS16 that widens the first
-# cell drops the control the cell already holds.
+# A first cell that is wide, or not one tmux and the terminal are known to size
+# alike (a narrow cell outside the agreed list, a VS16 that widens the cell the
+# control already leads), does not keep the control.
 check 5 "\033[8h${PDI}漢abc" 1 "漢abc"
 check 6 "\033[8h${LRI}${SUN}${VS16}abc" 1 "${SUN}${VS16}abc"
+check 13 "\033[8h${PDI}☝abc" 1 "☝abc"
+check 14 "\033[8h\033(0${LRI}lqk\033(B" 1 "lqk"
+
+# At most 8 controls lead a row.
+check 15 "\033[8h${LRI}${LRI}${LRI}${LRI}${LRI}${LRI}${LRI}${LRI}${LRI}a" 1 \
+    "${LRI}${LRI}${LRI}${LRI}${LRI}${LRI}${LRI}${LRI}a"
 
 # The control is not kept once an insert or delete line, a change of mode or an
 # insert or delete character at column 0 touches the row before the next

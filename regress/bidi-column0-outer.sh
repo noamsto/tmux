@@ -103,30 +103,37 @@ inner 3 "\033[8h\033[?2501h${A80}b\r${LRI}c" 0 && {
 	}
 }
 
-# A lead the terminal does not keep (the control before a VS16 widened cell)
-# is not written (checked on the bytes the inner client sends before the first
-# border, as the outer tmux would drop it itself; the right pane's own
-# initiator after the border is an LRI) and not counted, so the row has exactly one
-# closing PDI (the left segment's; the right pane is the rightmost segment).
-inner 4 "\033[8h\033[?2501h${LRI}☀️ abc" 1 "$RAW" && {
-	row1=$(printf '%s\n' "$captured" | sed -n 1p)
-	left=$(LC_ALL=C sed "s/.*$(printf '\033')\[1;1H//; s/$(printf '\342\224\202').*//" "$RAW")
-	case $left in
-	*"$(printf '%b' "$LRI")"*)
-		echo "[FAIL] case 4: the inner client wrote the pane's LRI"
-		exit_status=1
-		;;
-	esac
-	[ -s "$RAW" ] || {
-		echo "[FAIL] case 4: the inner client's refresh was not captured"
-		exit_status=1
-	}
-	pdis=$(printf '%s' "$row1" | grep -o "$(printf '%b' "$PDI")" | wc -l)
-	[ "$pdis" -eq 1 ] || {
-		echo "[FAIL] case 4: expected 1 PDI in row 1, got $pdis"
-		exit_status=1
+# check_shared <case> <left_pane_output>
+#   In a row shared with another pane, the pane's column-0 control is never
+#   written by the inner client or counted: the bytes the inner client sends
+#   before the first border (as the outer tmux would drop it itself; the right
+#   pane's own initiator after the border is an LRI) hold no LRI, and the row
+#   has exactly one closing PDI (the left segment's; the right pane is the
+#   rightmost segment).
+check_shared() {
+	inner "$1" "$2" 1 "$RAW" && {
+		row1=$(printf '%s\n' "$captured" | sed -n 1p)
+		left=$(LC_ALL=C sed "s/.*$(printf '\033')\[1;1H//; s/$(printf '\342\224\202').*//" "$RAW")
+		case $left in
+		*"$(printf '%b' "$LRI")"*)
+			echo "[FAIL] case $1: the inner client wrote the pane's LRI"
+			exit_status=1
+			;;
+		esac
+		[ -s "$RAW" ] || {
+			echo "[FAIL] case $1: the inner client's refresh was not captured"
+			exit_status=1
+		}
+		pdis=$(printf '%s' "$row1" | grep -o "$(printf '%b' "$PDI")" | wc -l)
+		[ "$pdis" -eq 1 ] || {
+			echo "[FAIL] case $1: expected 1 PDI in row 1, got $pdis"
+			exit_status=1
+		}
 	}
 }
+
+check_shared 4 "\033[8h\033[?2501h${LRI}abc"
+check_shared 6 "\033[8h\033[?2501h${LRI}☀️ abc"
 
 # A first cell the terminal may measure differently (the pointing hand) is not
 # led by the inner client's own isolate: it goes after the cell, which the
@@ -134,5 +141,6 @@ inner 4 "\033[8h\033[?2501h${LRI}☀️ abc" 1 "$RAW" && {
 # inner client writes isolates at all although the left pane is not.
 RIGHT="printf '\\033[8h\\033[?2501h'; sleep 100"
 check 5 "☝ abc" "☝${LRI}"
+RIGHT='sleep 100'
 
 exit $exit_status

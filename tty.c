@@ -746,7 +746,8 @@ tty_bidi_lead_size(const struct grid_cell *gc)
  * Does the terminal keep a control written at column 0 before this cell? Only
  * for a cell holding one character from a short list where tmux and the
  * terminal agree it is one column wide: for a cell the terminal makes another
- * width, it drops the control.
+ * width, it drops the control. A line drawing cell is never one: it is written
+ * through the line drawing character set one byte at a time.
  */
 int
 tty_bidi_agree(const struct grid_cell *gc)
@@ -756,6 +757,8 @@ tty_bidi_agree(const struct grid_cell *gc)
 	u_int			 n, c;
 
 	if (ud->width != 1 || (gc->flags & (GRID_FLAG_PADDING|GRID_FLAG_TAB)))
+		return (0);
+	if (gc->attr & GRID_ATTR_CHARSET)
 		return (0);
 	n = tty_bidi_lead_size(gc);
 	cp = ud->data + n;

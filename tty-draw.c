@@ -146,7 +146,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	u_int			 i, j, last_i, cx, ex, width;
 	u_int			 cellsize, bg;
 	int			 flags, empty, wrapped = 0, spaces, strip = 0;
-	int			 lead;
+	int			 after;
 	char			 buf[1000];
 	size_t			 len;
 	enum tty_draw_line_state current_state, next_state;
@@ -233,12 +233,12 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	 * written there, but drops it before a cell whose width it may see
 	 * differently, so then the control goes after that cell.
 	 */
-	lead = 0;
+	after = 0;
 	if ((style_ctx->bidi & TTY_STYLE_BIDI_ISOLATE) && atx == 0) {
 		if (cx != 0 || tty_bidi_agree(&gc))
 			tty_bidi_isolate(tty, style_ctx->bidi, 0, aty);
 		else
-			lead = 1;
+			after = 1;
 	}
 	if (cx != 0) {
 		/* Find the previous cell for the background colour. */
@@ -431,7 +431,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 			i += gcp->data.width;
 	}
 
-	if (lead)
+	if (after)
 		tty_bidi_isolate(tty, style_ctx->bidi, 1, aty);
 
 out:

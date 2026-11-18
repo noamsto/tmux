@@ -1456,7 +1456,9 @@ redraw_bidi_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 					break;
 				}
 			}
-			if (prompt == NULL && span->data.type == REDRAW_SPAN_PANE) {
+			if (prompt == NULL &&
+			    span->data.type == REDRAW_SPAN_PANE &&
+			    span->data.p.wp->screen == &span->data.p.wp->base) {
 				cx = span->data.p.wp->screen->cx;
 				cy = span->data.p.wp->screen->cy;
 			}
