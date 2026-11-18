@@ -2372,6 +2372,8 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 	    (ctx->xoff + ctx->ocx - ctx->wox == 0 ||
 	    (ctx->flags & TTY_CTX_CELL_INVALIDATE))) {
 		tty_draw_pane(tty, ctx, ctx->ocy);
+		if (ctx->flags & TTY_CTX_CELL_INVALIDATE)
+			tty_invalidate(tty);
 		return;
 	}
 
