@@ -641,7 +641,15 @@ tty_has_bidi(struct tty *tty)
 {
 	return (tty->term != NULL &&
 	    (tty->client->flags & CLIENT_UTF8) &&
-	    tty_term_has(tty->term, TTYC_ENBIDI));
+	    (tty_term_has(tty->term, TTYC_ENBIDI) ||
+	    tty_term_has(tty->term, TTYC_BIDIREG)));
+}
+
+/* Does this terminal lay out isolate regions with bidi mode off? */
+int
+tty_bidi_regions(struct tty *tty)
+{
+	return (tty->term != NULL && tty_term_has(tty->term, TTYC_BIDIREG));
 }
 
 /* Get the bidi style flags for a pane. */

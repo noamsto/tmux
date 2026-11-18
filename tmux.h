@@ -495,6 +495,7 @@ enum tty_code_code {
 	TTYC_BCE,
 	TTYC_BEL,
 	TTYC_BIDI,
+	TTYC_BIDIREG,
 	TTYC_BLINK,
 	TTYC_BOLD,
 	TTYC_CIVIS,
@@ -3101,6 +3102,7 @@ void	tty_close(struct tty *);
 void	tty_free(struct tty *);
 void	tty_update_features(struct tty *);
 int	tty_has_bidi(struct tty *);
+int	tty_bidi_regions(struct tty *);
 int	tty_pane_bidi(struct window_pane *);
 void	tty_set_bidi(struct tty *, int);
 void	tty_set_bidi_ctx(struct tty *, struct tty_ctx *);

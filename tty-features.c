@@ -181,6 +181,17 @@ static const struct tty_feature tty_feature_bidi = {
 	0
 };
 
+/* Terminal lays out isolate regions on rows written with bidi mode off. */
+static const char *const tty_feature_bidi_regions_capabilities[] = {
+	"Bidireg",
+	NULL
+};
+static const struct tty_feature tty_feature_bidi_regions = {
+	"bidi-regions",
+	tty_feature_bidi_regions_capabilities,
+	0
+};
+
 /* Terminal supports bracketed paste. */
 static const char *const tty_feature_bpaste_capabilities[] = {
 	"Enbp=\\E[?2004h",
@@ -426,6 +437,7 @@ static const struct tty_feature *const tty_features[] = {
 	&tty_feature_256,
 	&tty_feature_appesc,
 	&tty_feature_bidi,
+	&tty_feature_bidi_regions,
 	&tty_feature_bpaste,
 	&tty_feature_ccolour,
 	&tty_feature_clipboard,
