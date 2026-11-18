@@ -143,7 +143,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	const struct grid_cell	*gcp;
 	struct grid_cell	 gc, ngc, last;
 	struct grid_line	*gl;
-	u_int			 i, j, last_i, cx, ex, width;
+	u_int			 i, j, last_i, cx, ex, width, n;
 	u_int			 cellsize, bg;
 	int			 flags, empty, wrapped = 0, spaces, strip = 0;
 	int			 lead;
@@ -185,7 +185,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 		nx = tty->sx - atx;
 	if (nx == 0)
 		return;
-	if (spaces && !tty_bidi_keep(s, px, py, nx, atx))
+	if (spaces && !tty_bidi_keep(tty, s, px, py, nx, atx))
 		strip = 1;
 
 	/*
@@ -279,6 +279,23 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 			wrapped = 1;
 	}
 
+	/*
+	 * Controls written now would land on the row above, which the terminal
+	 * is waiting to wrap from. Write the first cell without them to wrap
+	 * onto this row, then return to column 0 to write it with them.
+	 */
+	if (wrapped && !strip) {
+		grid_view_get_cell(gd, px, py, &gc);
+		n = tty_bidi_lead_size(&gc);
+		if (n != 0 && tty_bidi_lead_ok(tty, &gc, 0)) {
+			tty_attributes(tty, &gc, style_ctx);
+			tty_putn(tty, gc.data.data + n, gc.data.size - n,
+			    gc.data.width);
+			tty_cursor(tty, 0, aty);
+			wrapped = 0;
+		}
+	}
+
 	/* Loop over each character in the range. */
 	last_i = i = 0;
 	len = 0;
@@ -316,8 +333,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 			} else {
 				/* Get the current cell. */
 				grid_view_get_cell(gd, px + i, py, &gc);
-				if ((~tty->flags & TTY_BIDI) || atx + i != 0)
-					tty_bidi_unlead(&gc);
+				tty_bidi_unlead(tty, &gc, atx + i);
 				gcp = &gc;
 
 #ifdef ENABLE_IMAGES

@@ -3270,9 +3270,10 @@ screen_write_combine(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 	struct grid		*gd = s->grid;
 	const struct utf8_data	*ud = &gc->data;
 	struct options		*oo = global_options;
-	u_int			 i, n, cx = s->cx, cy = s->cy, vis;
+	u_int			 i, n, cx = s->cx, cy = s->cy, vis, lead;
 	u_int			 sx = screen_size_x(s);
 	struct grid_cell	 last, tmp_gc;
+	struct utf8_data	 base;
 	struct tty_ctx		 ttyctx;
 	int			 force_wide = 0, zero_width = 0;
 	int			 xoff = 0, yoff = 0;
@@ -3303,10 +3304,7 @@ screen_write_combine(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 	if (cx == 0 &&
 	    (s->mode & MODE_BIDI) &&
 	    ud->size == 3 &&
-	    ud->data[0] == 0xe2 &&
-	    ud->data[1] == 0x81 &&
-	    ud->data[2] >= 0xa6 &&
-	    ud->data[2] <= 0xa9) {
+	    tty_bidi_lead_size(gc) == 3) {
 		if (s->lead.size != 0 && s->lead_cy != cy)
 			s->lead.size = 0;
 		if (s->lead.size + 3 < UTF8_SIZE) {
@@ -3339,7 +3337,13 @@ screen_write_combine(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 	 * (with an existing Unicode character) or a previous ZWJ.
 	 */
 	if (!zero_width) {
-		switch (hanguljamo_check_state(&last.data, ud)) {
+		/* Check the char, not the isolate controls kept before it. */
+		memcpy(&base, &last.data, sizeof base);
+		lead = tty_bidi_lead_size(&last);
+		base.size -= lead;
+		memmove(base.data, base.data + lead, base.size);
+
+		switch (hanguljamo_check_state(&base, ud)) {
 		case HANGULJAMO_STATE_NOT_COMPOSABLE:
 			return (1);
 		case HANGULJAMO_STATE_CHOSEONG:
@@ -3347,9 +3351,9 @@ screen_write_combine(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 		case HANGULJAMO_STATE_COMPOSABLE:
 			break;
 		case HANGULJAMO_STATE_NOT_HANGULJAMO:
-			if (utf8_should_combine(ud, &last.data))
+			if (utf8_should_combine(ud, &base))
 				force_wide = 1;
-			else if (!utf8_has_zwj(&last.data))
+			else if (!utf8_has_zwj(&base))
 				return (0);
 			break;
 		}
@@ -3375,6 +3379,11 @@ screen_write_combine(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 		if (sx < 2 || (cx == sx && (~s->mode & MODE_WRAP)))
 			return (1);
 		last.data.width = 2;
+
+		/* The terminal drops controls kept for a cell it widens. */
+		lead = tty_bidi_lead_size(&last);
+		last.data.size -= lead;
+		memmove(last.data.data, last.data.data + lead, last.data.size);
 
 		/* Clear the old character before moving to the next line. */
 		if (cx == sx) {

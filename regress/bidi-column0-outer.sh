@@ -23,12 +23,15 @@ exit_status=0
 
 FSI='\0342\0201\0250'
 PDI='\0342\0201\0251'
+LRI='\0342\0201\0246'
+A10=aaaaaaaaaa
+A80=$A10$A10$A10$A10$A10$A10$A10$A10
 
-# check <case> <left_pane_output> <expected>
-#   Show left_pane_output in the left pane of a two pane inner session, attach
-#   an inner client to it from an outer pane, then compare row 1 of the outer
-#   pane with expected (printf format).
-check() {
+# inner <case> <pane_output> <split>
+#   Show pane_output in the first pane of an inner session (split in two side
+#   by side panes if split is 1), attach an inner client to it from an outer
+#   pane and set captured to the outer pane.
+inner() {
 	$TMUX kill-server 2>/dev/null
 	$TMUX2 kill-server 2>/dev/null
 	sleep 1
@@ -38,15 +41,26 @@ check() {
 	$TMUX2 set -g status off || exit 1
 	$TMUX2 set -g window-size manual || exit 1
 	$TMUX2 set -as terminal-features '*:bidi' || exit 1
-	$TMUX2 splitw -h 'sleep 100' || exit 1
+	[ "$3" = 1 ] && { $TMUX2 splitw -h 'sleep 100' || exit 1; }
 	sleep 1
 	$TMUX new -d -x80 -y5 "TMUX= $TMUX2 attach" || exit 1
+	sleep 1
+	$TMUX2 refresh-client -t "$($TMUX2 list-clients -F '#{client_name}')" ||
+		exit 1
 	sleep 1
 	captured=$($TMUX capture-pane -p -t0:0.0) || {
 		echo "[FAIL] case $1: capture-pane failed"
 		exit_status=1
-		return
+		return 1
 	}
+}
+
+# check <case> <left_pane_output> <expected>
+#   Show left_pane_output in the left pane of a two pane inner session, attach
+#   an inner client to it from an outer pane, then compare row 1 of the outer
+#   pane with expected (printf format).
+check() {
+	inner "$1" "$2" 1 || return
 	actual=$(printf '%s\n' "$captured" | sed -n 1p)
 	expected=$(printf '%b' "$3")
 	case $actual in
@@ -65,5 +79,44 @@ check 1 "\033[8h\033[?2501hשלום world" "${FSI}ש"
 # The closing isolate of the pane's own FSI goes after the space the cursor is
 # on, not before it.
 check 2 "\033[8h\033[?2501h❯ ${FSI}אני " "${FSI}❯ ${FSI}אני ${PDI}"
+
+# A lead at column 0 of a row below a soft-wrapped full row is written after
+# the wrap, not at the end of the full row where the terminal is in pending
+# wrap.
+inner 3 "\033[8h\033[?2501h${A80}b\r${LRI}c" 0 && {
+	row1=$(printf '%s\n' "$captured" | sed -n 1p)
+	row2=$(printf '%s\n' "$captured" | sed -n 2p)
+	[ "$row1" = "$A80" ] || {
+		echo "[FAIL] case 3: expected row 1 of 80 a, got '$row1'"
+		exit_status=1
+	}
+	expected=$(printf '%b' "${LRI}c")
+	case $row2 in
+	"$expected"*) ;;
+	*)
+		echo "[FAIL] case 3: expected row 2 to start with '$expected'," \
+		    "got '$row2'"
+		exit_status=1
+		;;
+	esac
+}
+
+# A lead the terminal does not keep (the control before a VS16 widened cell)
+# is neither written nor counted, so the row has exactly one closing PDI (the
+# left segment's; the right pane is the rightmost segment).
+inner 4 "\033[8h\033[?2501h${LRI}☀️ abc" 1 && {
+	row1=$(printf '%s\n' "$captured" | sed -n 1p)
+	case $row1 in
+	"$(printf '%b' "$LRI")"*)
+		echo "[FAIL] case 4: row 1 starts with the pane's LRI"
+		exit_status=1
+		;;
+	esac
+	pdis=$(printf '%s' "$row1" | grep -o "$(printf '%b' "$PDI")" | wc -l)
+	[ "$pdis" -eq 1 ] || {
+		echo "[FAIL] case 4: expected 1 PDI in row 1, got $pdis"
+		exit_status=1
+	}
+}
 
 exit $exit_status

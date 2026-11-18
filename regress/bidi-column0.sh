@@ -22,6 +22,8 @@ exit_status=0
 
 PDI='\0342\0201\0251'
 LRI='\0342\0201\0246'
+SUN='\0342\0230\0200'
+VS16='\0357\0270\0217'
 
 # check <case> <pane_output> <rows> <expected>
 #   Show pane_output in a 40x5 pane, then compare rows (a sed address, 1-based)
@@ -51,6 +53,11 @@ check 1 "\033[8h${PDI}abc" 1 "${PDI}abc"
 check 2 "${PDI}abc" 1 "abc"
 check 3 "\033[8h${LRI}\r\nx" 1,2 "\nx"
 check 4 "\033[8h\033[5;1H${PDI}\r\nx" 5 "x"
+
+# A wide first cell does not keep the control; a VS16 that widens the first
+# cell drops the control the cell already holds.
+check 5 "\033[8h${PDI}漢abc" 1 "漢abc"
+check 6 "\033[8h${LRI}${SUN}${VS16}abc" 1 "${SUN}${VS16}abc"
 
 $TMUX kill-server 2>/dev/null
 
