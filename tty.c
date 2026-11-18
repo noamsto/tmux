@@ -671,7 +671,9 @@ tty_pane_bidi(struct window_pane *wp)
 
 /*
  * Get the bidi style flags for a pane. With isolate regions only bidi panes are
- * bracketed, so a pane is isolated whether or not it is full width.
+ * bracketed, so a pane is isolated whether or not it is full width. The
+ * terminal pairs isolates across the whole row, so other panes have their own
+ * isolate controls stripped.
  */
 int
 tty_pane_bidi_bits(struct tty *tty, struct window_pane *wp, int full)
@@ -680,7 +682,7 @@ tty_pane_bidi_bits(struct tty *tty, struct window_pane *wp, int full)
 
 	if (tty_bidi_regions(tty)) {
 		if (~wp->base.mode & MODE_BIDI)
-			return (0);
+			return (TTY_STYLE_BIDI_STRIP);
 		return (tty_pane_bidi(wp)|TTY_STYLE_BIDI_ISOLATE);
 	}
 	bits = tty_pane_bidi(wp);
@@ -886,7 +888,7 @@ tty_bidi_paragraph(struct tty *tty, int bits)
 {
 	if (~tty->flags & TTY_BIDI)
 		return;
-	if (bits & TTY_STYLE_BIDI_ISOLATE)
+	if (bits & (TTY_STYLE_BIDI_ISOLATE|TTY_STYLE_BIDI_STRIP))
 		bits = 0;
 
 	if (bits & TTY_STYLE_BIDI_AUTO) {
@@ -1805,15 +1807,17 @@ tty_draw_pane(struct tty *tty, const struct tty_ctx *ctx, u_int py)
 /*
  * Fix the isolate controls after a partial write. A line holding isolate
  * controls of its own is redrawn whole because the controls closing them follow
- * the last non-blank cell, which moves as text is written.
+ * the last non-blank cell, which moves as text is written, or because they
+ * were written as they came and must be stripped.
  */
 static void
 tty_bidi_partial(struct tty *tty, const struct tty_ctx *ctx, u_int py,
     u_int px, u_int nx)
 {
+	int	bits = ctx->style_ctx.bidi;
 	u_int	i, x, rx, ry, last, controls, unmatched;
 
-	if (~ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE)
+	if ((bits & (TTY_STYLE_BIDI_ISOLATE|TTY_STYLE_BIDI_STRIP)) == 0)
 		return;
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return;
@@ -1821,7 +1825,7 @@ tty_bidi_partial(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 	tty_bidi_scan(ctx->s, i, py, rx, &last, &controls, &unmatched);
 	if (controls != 0)
 		tty_draw_pane(tty, ctx, py);
-	else
+	else if (bits & TTY_STYLE_BIDI_ISOLATE)
 		tty_bidi_line(tty, ctx, py, px, nx);
 }
 
@@ -2009,6 +2013,8 @@ tty_cmd_insertline(struct tty *tty, const struct tty_ctx *ctx)
 	if ((ctx->flags & TTY_CTX_WINDOW_BIGGER) ||
 	    !tty_full_width(tty, ctx) ||
 	    tty_fake_bce(tty, &ctx->defaults, ctx->bg) ||
+	    (tty_bidi_regions(tty) &&
+	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE)) ||
 	    !tty_term_has(tty->term, TTYC_CSR) ||
 	    !tty_term_has(tty->term, TTYC_IL1) ||
 	    ctx->sx == 1 ||
@@ -2033,6 +2039,8 @@ tty_cmd_deleteline(struct tty *tty, const struct tty_ctx *ctx)
 	if ((ctx->flags & TTY_CTX_WINDOW_BIGGER) ||
 	    !tty_full_width(tty, ctx) ||
 	    tty_fake_bce(tty, &ctx->defaults, ctx->bg) ||
+	    (tty_bidi_regions(tty) &&
+	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE)) ||
 	    !tty_term_has(tty->term, TTYC_CSR) ||
 	    !tty_term_has(tty->term, TTYC_DL1) ||
 	    ctx->sx == 1 ||
@@ -2347,7 +2355,8 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 	 * A combined cell too long for the grid may hold isolate controls the
 	 * grid does not, so draw the line from the grid instead.
 	 */
-	if ((ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) &&
+	if ((ctx->style_ctx.bidi &
+	    (TTY_STYLE_BIDI_ISOLATE|TTY_STYLE_BIDI_STRIP)) &&
 	    tty_bidi_has_control(&ctx->cell->data)) {
 		tty_draw_pane(tty, ctx, ctx->ocy);
 		return;
@@ -2355,11 +2364,13 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 
 	/*
 	 * With isolate regions the initiator for column 0 must be written
-	 * before that cell, so redraw the line.
+	 * before that cell, and invalidating the cursor would lose the
+	 * pending wrap the closing PDI needs, so redraw the line.
 	 */
 	if (tty_bidi_regions(tty) &&
 	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) &&
-	    ctx->xoff + ctx->ocx - ctx->wox == 0) {
+	    (ctx->xoff + ctx->ocx - ctx->wox == 0 ||
+	    (ctx->flags & TTY_CTX_CELL_INVALIDATE))) {
 		tty_draw_pane(tty, ctx, ctx->ocy);
 		return;
 	}

@@ -1349,7 +1349,9 @@ redraw_bidi_get(struct redraw_draw_ctx *dctx, struct redraw_span *span)
 		return (tty_pane_bidi_bits(tty, span->data.p.wp, full));
 	case REDRAW_SPAN_MENU:
 	case REDRAW_SPAN_STATUS:
-		if (tty_bidi_regions(tty) || full)
+		if (tty_bidi_regions(tty))
+			return (TTY_STYLE_BIDI_STRIP);
+		if (full)
 			return (0);
 		return (TTY_STYLE_BIDI_ISOLATE);
 	default:
@@ -2334,11 +2336,12 @@ redraw_draw(struct client *c, struct window_pane *wp, int flags)
 				y = dctx.status_lines;
 			else
 				y = 0;
-			if ((dctx.flags & REDRAW_BIDI) &&
-			    !tty_bidi_regions(tty))
-				bidi = TTY_STYLE_BIDI_ISOLATE;
-			else
+			if (~dctx.flags & REDRAW_BIDI)
 				bidi = 0;
+			else if (tty_bidi_regions(tty))
+				bidi = TTY_STYLE_BIDI_STRIP;
+			else
+				bidi = TTY_STYLE_BIDI_ISOLATE;
 			sc = redraw_bidi_style(&style_ctx,
 			    &c->side_status.screen, bidi);
 			for (i = 0; i < status_side_rows(c); i++) {

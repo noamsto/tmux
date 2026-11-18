@@ -191,6 +191,8 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 		return;
 	if (spaces && !tty_bidi_keep(s, px, py, nx))
 		strip = 1;
+	if (style_ctx->bidi & TTY_STYLE_BIDI_STRIP)
+		strip = 1;
 
 	/*
 	 * Clamp the width to cellsize - note this is not cellused, because

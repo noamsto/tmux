@@ -1855,6 +1855,7 @@ struct tty_style_ctx {
 #define TTY_STYLE_BIDI_AUTO 0x1
 #define TTY_STYLE_BIDI_RTL 0x2
 #define TTY_STYLE_BIDI_ISOLATE 0x4
+#define TTY_STYLE_BIDI_STRIP 0x8
 };
 
 /* Maximum reported terminal size. */
