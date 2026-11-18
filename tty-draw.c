@@ -146,6 +146,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	u_int			 i, j, last_i, cx, ex, width;
 	u_int			 cellsize, bg;
 	int			 flags, empty, wrapped = 0, spaces, strip = 0;
+	int			 lead;
 	char			 buf[1000];
 	size_t			 len;
 	enum tty_draw_line_state current_state, next_state;
@@ -226,6 +227,18 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 #endif
 		cx++;
 	}
+
+	/*
+	 * The terminal keeps a control written at column 0 for the next cell
+	 * written there. A wide cell takes none, so the control goes after it.
+	 */
+	lead = 0;
+	if ((style_ctx->bidi & TTY_STYLE_BIDI_ISOLATE) && atx == 0) {
+		if (cx != 0 || gc.data.width <= 1)
+			tty_bidi_isolate(tty, style_ctx->bidi, 0, aty);
+		else
+			lead = 1;
+	}
 	if (cx != 0) {
 		/* Find the previous cell for the background colour. */
 		for (i = px + 1; i > 0; i--) {
@@ -303,6 +316,8 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 			} else {
 				/* Get the current cell. */
 				grid_view_get_cell(gd, px + i, py, &gc);
+				if (~tty->flags & TTY_BIDI)
+					tty_bidi_unlead(&gc);
 				gcp = &gc;
 
 #ifdef ENABLE_IMAGES
@@ -401,6 +416,9 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 		else
 			i += gcp->data.width;
 	}
+
+	if (lead)
+		tty_bidi_isolate(tty, style_ctx->bidi, 1, aty);
 
 out:
 	tty->flags = (tty->flags & ~TTY_NOCURSOR)|flags;

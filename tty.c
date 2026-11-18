@@ -708,7 +708,8 @@ tty_set_bidi_ctx(struct tty *tty, struct tty_ctx *ctx)
 
 /*
  * Write an isolate initiator. It is stored in the cell left of the cursor, so
- * it is written with no width.
+ * it is written with no width. At column 0 there is no such cell, so the
+ * terminal keeps it for the next cell written there.
  */
 void
 tty_bidi_isolate(struct tty *tty, int bits, u_int x, u_int y)
@@ -723,6 +724,28 @@ tty_bidi_isolate(struct tty *tty, int bits, u_int x, u_int y)
 		s = "\342\201\246"; /* LRI */
 	tty_cursor(tty, x, y);
 	tty_putn(tty, s, 3, 0);
+}
+
+/*
+ * Remove the isolate controls a pane printed at column 0 from the front of the
+ * cell. A terminal without the bidi mode would get bytes upstream never sent.
+ */
+void
+tty_bidi_unlead(struct grid_cell *gc)
+{
+	struct utf8_data	*ud = &gc->data;
+	u_int			 n = 0;
+
+	while (n + 2 < ud->size &&
+	    ud->data[n] == 0xe2 &&
+	    ud->data[n + 1] == 0x81 &&
+	    ud->data[n + 2] >= 0xa6 &&
+	    ud->data[n + 2] <= 0xa9)
+		n += 3;
+	if (n == 0)
+		return;
+	ud->size -= n;
+	memmove(ud->data, ud->data + n, ud->size);
 }
 
 /* Does this cell hold an isolate control? */
@@ -800,11 +823,12 @@ tty_bidi_keep(struct screen *s, u_int px, u_int py, u_int nx)
 /*
  * Close an isolate at x,y, including any isolates the pane's own text in the
  * given cells left open. Those are closed right after the last non-blank cell,
- * so trailing blanks stay outside them as they would without the isolate.
+ * or at the pane cursor (cx,cy) if that is further right on its row, so blanks
+ * typed before the cursor stay inside the isolate.
  */
 void
 tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
-    u_int nx, u_int x, u_int y)
+    u_int nx, u_int x, u_int y, u_int cx, u_int cy)
 {
 	u_int	i, last = nx, controls, unmatched, depth = 0;
 
@@ -813,6 +837,9 @@ tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
 		    &unmatched);
 		if (controls + depth > 2 || unmatched != 0)
 			depth = 0;
+		else if (depth > 0 && cx != UINT_MAX && cy == py && cx > px &&
+		    last < cx - px)
+			last = cx - px < nx ? cx - px : nx;
 	}
 
 	if (depth > 0) {
@@ -1696,8 +1723,7 @@ tty_clear_pane_area(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 
 /*
  * Rewrite the isolate controls for a pane line after cells px to px + nx - 1
- * were written. An initiator at column 0 goes after the first cell because
- * there is no cell left of column 0 to hold it.
+ * were written.
  */
 static void
 tty_bidi_line(struct tty *tty, const struct tty_ctx *ctx, u_int py, u_int px,
@@ -1711,15 +1737,30 @@ tty_bidi_line(struct tty *tty, const struct tty_ctx *ctx, u_int py, u_int px,
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return;
 
-	if (x == 0 && px <= i && px + nx > i)
-		tty_bidi_isolate(tty, bits, 1, ry);
 	if (x + rx < tty->sx && px < i + rx && px + nx >= i + rx) {
-		tty_bidi_close(tty, ctx->s, i, py, rx, x + rx, ry);
+		tty_bidi_close(tty, ctx->s, i, py, rx, x + rx, ry,
+		    ctx->cursor_x, ctx->cursor_y);
 		if (status_side_at_column(tty->client) > 0 &&
 		    (u_int)status_side_at_column(tty->client) == x + rx)
 			tty_bidi_isolate(tty, TTY_STYLE_BIDI_ISOLATE, x + rx,
 			    ry);
 	}
+}
+
+/*
+ * Write the initiator of a pane line at column 0 of the terminal around the
+ * cell about to be written (before) or just written (after) at x,y. A wide
+ * cell takes no pending control, so for one it goes after the cell.
+ */
+static void
+tty_bidi_lead(struct tty *tty, const struct tty_ctx *ctx, u_int x, u_int y,
+    int before)
+{
+	int	bits = ctx->style_ctx.bidi;
+
+	if (~bits & TTY_STYLE_BIDI_ISOLATE || x != 0)
+		return;
+	tty_bidi_isolate(tty, bits, before ? 0 : 1, y);
 }
 
 /* Redraw a line of a screen at py. */
@@ -2261,6 +2302,8 @@ tty_cmd_alignmenttest(struct tty *tty, const struct tty_ctx *ctx)
 
 	for (j = 0; j < ctx->sy; j++) {
 		tty_cursor_pane(tty, ctx, 0, j);
+		tty_bidi_lead(tty, ctx, ctx->xoff - ctx->wox,
+		    ctx->yoff + j - ctx->woy, 1);
 		for (i = 0; i < ctx->sx; i++)
 			tty_putc(tty, 'E');
 		tty_bidi_line(tty, ctx, j, 0, ctx->sx);
@@ -2270,6 +2313,8 @@ tty_cmd_alignmenttest(struct tty *tty, const struct tty_ctx *ctx)
 void
 tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 {
+	u_int	x, y;
+
 	if (!tty_is_visible(tty, ctx, ctx->ocx, ctx->ocy, 1, 1))
 		return;
 
@@ -2293,7 +2338,13 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 		tty_invalidate(tty);
 	tty_cursor_pane_unless_wrap(tty, ctx, ctx->ocx, ctx->ocy);
 
+	x = ctx->xoff + ctx->ocx - ctx->wox;
+	y = ctx->yoff + ctx->ocy - ctx->woy;
+	if (ctx->cell->data.width <= 1)
+		tty_bidi_lead(tty, ctx, x, y, 1);
 	tty_cell(tty, ctx->cell, &ctx->style_ctx);
+	if (ctx->cell->data.width > 1)
+		tty_bidi_lead(tty, ctx, x, y, 0);
 
 	if (ctx->flags & TTY_CTX_CELL_INVALIDATE)
 		tty_invalidate(tty);
@@ -2328,6 +2379,8 @@ tty_cmd_cells(struct tty *tty, const struct tty_ctx *ctx)
 
 	tty_margin_off(tty);
 	tty_cursor_pane_unless_wrap(tty, ctx, ctx->ocx, ctx->ocy);
+	tty_bidi_lead(tty, ctx, ctx->xoff + ctx->ocx - ctx->wox,
+	    ctx->yoff + ctx->ocy - ctx->woy, 1);
 	tty_attributes(tty, ctx->cell, &ctx->style_ctx);
 	tty_putn(tty, cp, n, n);
 	tty_bidi_partial(tty, ctx, ctx->ocy, ctx->ocx, n);
@@ -2381,6 +2434,7 @@ tty_cell(struct tty *tty, const struct grid_cell *gc,
     const struct tty_style_ctx *style_ctx)
 {
 	const struct grid_cell	*gcp;
+	struct grid_cell	 ugc;
 
 	/* Skip last character if terminal is stupid. */
 	if ((tty->term->flags & TERM_NOAM) &&
@@ -2391,6 +2445,14 @@ tty_cell(struct tty *tty, const struct grid_cell *gc,
 	/* If this is a padding character, do nothing. */
 	if (gc->flags & GRID_FLAG_PADDING)
 		return;
+
+	if ((~tty->flags & TTY_BIDI) &&
+	    gc->data.size > 3 &&
+	    gc->data.data[0] == 0xe2) {
+		memcpy(&ugc, gc, sizeof ugc);
+		tty_bidi_unlead(&ugc);
+		gc = &ugc;
+	}
 
 	/* Check the output codeset and apply attributes. */
 	gcp = tty_check_codeset(tty, gc);

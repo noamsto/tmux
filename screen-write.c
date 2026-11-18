@@ -38,6 +38,7 @@ static void	screen_write_clear_cell(struct screen_write_ctx *, u_int,
 		    u_int);
 static int	screen_write_combine(struct screen_write_ctx *,
 		    const struct grid_cell *);
+static void	screen_write_lead_clear(struct screen_write_ctx *);
 static void	screen_write_sync_flush_dirty(struct window_pane *);
 static void	screen_write_sync_apply_scroll(struct screen_write_ctx *,
 		    struct tty_ctx *);
@@ -386,6 +387,8 @@ screen_write_initctx(struct screen_write_ctx *ctx, struct tty_ctx *ttyctx,
 
 	ttyctx->ocx = s->cx;
 	ttyctx->ocy = s->cy;
+	ttyctx->cursor_x = s->cx;
+	ttyctx->cursor_y = s->cy;
 	ttyctx->orlower = s->rlower;
 	ttyctx->orupper = s->rupper;
 
@@ -1594,6 +1597,8 @@ screen_write_alignmenttest(struct screen_write_ctx *ctx)
 	struct grid_cell	 gc;
 	u_int			 xx, yy;
 
+	screen_write_lead_clear(ctx);
+
 	memcpy(&gc, &grid_default_cell, sizeof gc);
 	utf8_set(&gc.data, 'E');
 
@@ -1764,6 +1769,8 @@ screen_write_clearcharacter(struct screen_write_ctx *ctx, u_int nx, u_int bg)
 	struct screen	*s = ctx->s;
 	struct tty_ctx	 ttyctx;
 
+	screen_write_lead_clear(ctx);
+
 	if (nx == 0)
 		nx = 1;
 
@@ -1895,6 +1902,8 @@ screen_write_clearline(struct screen_write_ctx *ctx, u_int bg)
 	struct osc133_data		 od;
 	u_int				 flags;
 
+	screen_write_lead_clear(ctx);
+
 	gl = grid_get_line(s->grid, s->grid->hsize + s->cy);
 	if (gl->cellsize == 0 && COLOUR_DEFAULT(bg)) {
 #ifdef ENABLE_IMAGES
@@ -1933,6 +1942,8 @@ screen_write_clearendofline(struct screen_write_ctx *ctx, u_int bg)
 	struct grid_line		*gl;
 	u_int				 sx = screen_size_x(s);
 	struct screen_write_citem	*ci = ctx->item;
+
+	screen_write_lead_clear(ctx);
 
 	if (s->cx == 0) {
 		screen_write_clearline(ctx, bg);
@@ -1973,6 +1984,8 @@ screen_write_clearstartofline(struct screen_write_ctx *ctx, u_int bg)
 	struct screen			 *s = ctx->s;
 	u_int				 sx = screen_size_x(s);
 	struct screen_write_citem	*ci = ctx->item;
+
+	screen_write_lead_clear(ctx);
 
 	if (s->cx >= sx - 1) {
 		screen_write_clearline(ctx, bg);
@@ -2033,6 +2046,8 @@ screen_write_reverseindex(struct screen_write_ctx *ctx, u_int bg)
 			screen_write_set_cursor(ctx, -1, s->cy - 1);
 		return;
 	}
+
+	screen_write_lead_clear(ctx);
 
 #ifdef ENABLE_IMAGES
 	image_redraw_scroll(ctx);
@@ -2117,6 +2132,8 @@ screen_write_linefeed(struct screen_write_ctx *ctx, int wrapped, u_int bg)
 		return;
 	}
 
+	screen_write_lead_clear(ctx);
+
 #ifdef ENABLE_IMAGES
 	image_redraw_scroll(ctx);
 #endif
@@ -2133,6 +2150,8 @@ screen_write_scrollup(struct screen_write_ctx *ctx, u_int lines, u_int bg)
 	struct screen	*s = ctx->s;
 	struct grid	*gd = s->grid;
 	u_int		 i;
+
+	screen_write_lead_clear(ctx);
 
 	if (lines == 0)
 		lines = 1;
@@ -2163,6 +2182,8 @@ screen_write_scrolldown(struct screen_write_ctx *ctx, u_int lines, u_int bg)
 	struct grid	*gd = s->grid;
 	struct tty_ctx	 ttyctx;
 	u_int		 i, ry;
+
+	screen_write_lead_clear(ctx);
 
 	screen_write_initctx(ctx, &ttyctx, 1, 1);
 	ttyctx.bg = bg;
@@ -2211,6 +2232,8 @@ screen_write_clearendofscreen(struct screen_write_ctx *ctx, u_int bg)
 	u_int			 y, i, xoff, yoff, ocx, ocy;
 	struct visible_ranges	*r;
 	struct visible_range	*ri;
+
+	screen_write_lead_clear(ctx);
 
 	screen_write_initctx(ctx, &ttyctx, 1, 1);
 	ttyctx.bg = bg;
@@ -2296,6 +2319,8 @@ screen_write_clearstartofscreen(struct screen_write_ctx *ctx, u_int bg)
 	struct visible_ranges	*r;
 	struct visible_range	*ri;
 
+	screen_write_lead_clear(ctx);
+
 	screen_write_initctx(ctx, &ttyctx, 1, 1);
 	ttyctx.bg = bg;
 
@@ -2370,6 +2395,8 @@ screen_write_clearscreen(struct screen_write_ctx *ctx, u_int bg)
 	u_int			 y, i, xoff, yoff, ocx, ocy;
 	struct visible_ranges	*r;
 	struct visible_range	*ri;
+
+	screen_write_lead_clear(ctx);
 
 	screen_write_initctx(ctx, &ttyctx, 1, 1);
 	ttyctx.bg = bg;
@@ -2613,7 +2640,8 @@ screen_write_collect_flush_scrolled(struct screen_write_ctx *ctx)
 
 /* Flush a collected line. */
 static u_int
-screen_write_collect_flush_line(struct screen_write_ctx *ctx, u_int y)
+screen_write_collect_flush_line(struct screen_write_ctx *ctx, u_int y,
+    u_int cx, u_int cy)
 {
 	struct window_pane		*wp = ctx->wp;
 	struct screen			*s = ctx->s;
@@ -2682,11 +2710,15 @@ screen_write_collect_flush_line(struct screen_write_ctx *ctx, u_int y)
 			screen_write_set_cursor(ctx, w_start, y);
 			if (ci->type == CLEAR) {
 				screen_write_initctx(ctx, &ttyctx, 1, 0);
+				ttyctx.cursor_x = cx;
+				ttyctx.cursor_y = cy;
 				ttyctx.bg = ci->bg;
 				ttyctx.n = w_length;
 				tty_write(tty_cmd_clearcharacter, &ttyctx);
 			} else {
 				screen_write_initctx(ctx, &ttyctx, 0, 1);
+				ttyctx.cursor_x = cx;
+				ttyctx.cursor_y = cy;
 				if (ttyctx.flags & TTY_CTX_PANE_OBSCURED) {
 					ttyctx.n = w_length;
 					tty_write(tty_cmd_redrawline, &ttyctx);
@@ -2749,7 +2781,8 @@ screen_write_collect_flush(struct screen_write_ctx *ctx, int scroll_only,
 
 	cx = s->cx; cy = s->cy;
 	for (y = 0; y < screen_size_y(s); y++)
-		items += screen_write_collect_flush_line(ctx, y);
+		items += screen_write_collect_flush_line(ctx, y, cx,
+			    cy);
 	s->cx = cx; s->cy = cy;
 
 	log_debug("%s: flushed %u items (%s)", __func__, items, from);
@@ -2940,6 +2973,8 @@ screen_write_collect_add(struct screen_write_ctx *ctx,
 		collect = 0;
 	else if (s->sel != NULL)
 		collect = 0;
+	else if (s->lead.size != 0)
+		collect = 0;
 	if (!collect) {
 		screen_write_collect_end(ctx);
 		screen_write_collect_flush(ctx, 0, __func__);
@@ -3114,6 +3149,8 @@ screen_write_cell1(struct screen_write_ctx *ctx, const struct grid_cell *gc,
 		screen_write_set_cursor(ctx, s->cx + width, -1);
 	else
 		screen_write_set_cursor(ctx, sx - not_wrap, -1);
+	ttyctx.cursor_x = s->cx;
+	ttyctx.cursor_y = s->cy;
 
 	/* Create space for character in insert mode. */
 	if ((s->mode & MODE_INSERT) && ins_width != 0) {
@@ -3179,15 +3216,47 @@ screen_write_cell1(struct screen_write_ctx *ctx, const struct grid_cell *gc,
 	}
 }
 
+/* Drop any isolate control kept for the next cell at column 0. */
+static void
+screen_write_lead_clear(struct screen_write_ctx *ctx)
+{
+	ctx->s->lead.size = 0;
+}
+
 /* Write cell data. */
 void
 screen_write_cell(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 {
+	struct screen		*s = ctx->s;
+	struct grid_cell	 lgc;
+	u_int			 n = s->lead.size;
+
 	if (gc->flags & GRID_FLAG_PADDING)
 		return;
 	if (screen_write_combine(ctx, gc) != 0)
 		return;
-	screen_write_cell1(ctx, gc, 0);
+	if (n == 0) {
+		screen_write_cell1(ctx, gc, 0);
+		return;
+	}
+	s->lead.size = 0;
+
+	/*
+	 * Store the kept controls before the char so every redraw writes them
+	 * at column 0 ahead of it, where the terminal applies them.
+	 */
+	if (s->cx != 0 ||
+	    s->cy != s->lead_cy ||
+	    (gc->flags & GRID_FLAG_TAB) ||
+	    n + gc->data.size >= UTF8_SIZE) {
+		screen_write_cell1(ctx, gc, 0);
+		return;
+	}
+	memcpy(&lgc, gc, sizeof lgc);
+	memcpy(lgc.data.data, s->lead.data, n);
+	memcpy(lgc.data.data + n, gc->data.data, gc->data.size);
+	lgc.data.size = n + gc->data.size;
+	screen_write_cell1(ctx, &lgc, 0);
 }
 
 /* Combine a UTF-8 zero-width character onto the previous if necessary. */
@@ -3224,6 +3293,27 @@ screen_write_combine(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 			force_wide = 1;
 	} else if (ud->width == 0)
 		zero_width = 1;
+
+	/*
+	 * The terminal applies an isolate control written at column 0 to the
+	 * next cell written there, so keep it for that cell.
+	 */
+	if (cx == 0 &&
+	    (s->mode & MODE_BIDI) &&
+	    ud->size == 3 &&
+	    ud->data[0] == 0xe2 &&
+	    ud->data[1] == 0x81 &&
+	    ud->data[2] >= 0xa6 &&
+	    ud->data[2] <= 0xa9) {
+		if (s->lead.size != 0 && s->lead_cy != cy)
+			s->lead.size = 0;
+		if (s->lead.size + 3 < UTF8_SIZE) {
+			memcpy(s->lead.data + s->lead.size, ud->data, 3);
+			s->lead.size += 3;
+			s->lead_cy = cy;
+		}
+		return (1);
+	}
 
 	/* Cannot combine empty character or at left. */
 	if (ud->size < 2 || cx == 0)

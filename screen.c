@@ -79,6 +79,7 @@ screen_init(struct screen *s, u_int sx, u_int sy, u_int hlimit)
 	s->grid = grid_create(sx, sy, hlimit);
 	s->saved_grid = NULL;
 	s->saved_bidi = 0;
+	s->lead.size = 0;
 
 	s->title = xstrdup("");
 	s->titles = NULL;
@@ -116,6 +117,7 @@ screen_reinit(struct screen *s)
 		s->mode = (s->mode & ~EXTENDED_KEY_MODES)|MODE_KEYS_EXTENDED;
 
 	s->saved_bidi = 0;
+	s->lead.size = 0;
 	if (SCREEN_IS_ALTERNATE(s))
 		screen_alternate_off(s, NULL, 0);
 	s->saved_cx = UINT_MAX;
@@ -334,6 +336,7 @@ screen_resize_cursor(struct screen *s, u_int sx, u_int sy, int reflow,
 
 	if (s->write_list != NULL)
 		screen_write_free_list(s);
+	s->lead.size = 0;
 
 	log_debug("%s: new size %ux%u, now %ux%u (cursor %u,%u = %u,%u)",
 	    __func__, sx, sy, screen_size_x(s), screen_size_y(s), s->cx, s->cy,
@@ -683,6 +686,7 @@ screen_alternate_on(struct screen *s, struct grid_cell *gc, int cursor)
 		return 0;
 	s->saved_bidi = s->mode & BIDI_MODES;
 	s->mode &= ~BIDI_MODES;
+	s->lead.size = 0;
 
 	sx = screen_size_x(s);
 	sy = screen_size_y(s);
@@ -738,6 +742,7 @@ screen_alternate_off(struct screen *s, struct grid_cell *gc, int cursor)
 
 	s->mode = (s->mode & ~BIDI_MODES)|s->saved_bidi;
 	s->saved_bidi = 0;
+	s->lead.size = 0;
 
 	/* Clamp cursor to the current screen size. */
 	if (s->cy > screen_size_y(s) - 1)
