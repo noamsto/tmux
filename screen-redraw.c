@@ -1426,9 +1426,10 @@ redraw_bidi_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 	bits = redraw_bidi_get(dctx, span);
 
 	if (bits & TTY_STYLE_BIDI_ISOLATE) {
-		if (x0 == 0)
+		if (x0 == 0 && !tty_bidi_regions(tty))
 			tty_bidi_isolate(tty, bits, 1, y);
-		if (x1 < tty->sx) {
+		if (x1 < tty->sx ||
+		    (x1 == tty->sx && tty_bidi_regions(tty))) {
 			if (prompt != NULL) {
 				s = prompt;
 				px = span->data.p.px;

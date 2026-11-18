@@ -51,8 +51,13 @@ tty_draw_line_clear(struct tty *tty, u_int px, u_int py, u_int nx,
 	if (nx == 0)
 		return;
 
-	/* If genuine BCE is available, can try escape sequences. */
+	/*
+	 * If genuine BCE is available, can try escape sequences. With isolate
+	 * regions an erase would drop a pending leading control and leave the
+	 * terminal out of the pending-wrap state the closing PDI needs.
+	 */
 	if (!wrapped &&
+	    !(spaces && tty_bidi_regions(tty)) &&
 	    nx >= 10 &&
 	    !tty_fake_bce(tty, defaults, bg)) {
 		/* Off the end of the line, use EL if available. */
@@ -206,6 +211,15 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	tty_update_mode(tty, tty->mode, s);
 	tty_region_off(tty);
 	tty_margin_off(tty);
+
+	/*
+	 * With isolate regions the initiator for column 0 is written before
+	 * the first cell, which the terminal keeps as that cell's leading
+	 * control. The explicit cursor move also stops the row continuing a
+	 * wrapped previous row.
+	 */
+	if (spaces && atx == 0 && tty_bidi_regions(tty))
+		tty_bidi_isolate(tty, style_ctx->bidi, 0, aty);
 
 	/* Start with the default cell as the last cell. */
 	memcpy(&last, &grid_default_cell, sizeof last);

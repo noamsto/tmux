@@ -852,11 +852,30 @@ tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
 			depth = 0;
 	}
 
+	/*
+	 * At the last column the PDI must be written while the terminal is
+	 * still in the pending-wrap state after the last cell, so it attaches
+	 * to that cell; a cursor move there would attach it to the cell before.
+	 */
+	if (x == tty->sx) {
+		if ((~tty->term->flags & TERM_NOAM) &&
+		    tty->cx == tty->sx &&
+		    tty->cy == y)
+			tty_putn(tty, "\342\201\251", 3, 0); /* PDI */
+		else {
+			log_debug("%s: region not closed at %u,%u", __func__,
+			    x, y);
+			if (last == nx)
+				depth = 0;
+		}
+	}
 	if (depth > 0) {
 		tty_cursor(tty, x - nx + last, y);
 		for (i = 0; i < depth; i++)
 			tty_putn(tty, "\342\201\251", 3, 0); /* PDI */
 	}
+	if (x == tty->sx)
+		return;
 	tty_cursor(tty, x, y);
 	tty_putn(tty, "\342\201\251", 3, 0); /* PDI */
 }
@@ -1748,9 +1767,11 @@ tty_bidi_line(struct tty *tty, const struct tty_ctx *ctx, u_int py, u_int px,
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return;
 
-	if (x == 0 && px <= i && px + nx > i)
+	if (x == 0 && px <= i && px + nx > i && !tty_bidi_regions(tty))
 		tty_bidi_isolate(tty, bits, 1, ry);
-	if (x + rx < tty->sx && px < i + rx && px + nx >= i + rx) {
+	if ((x + rx < tty->sx ||
+	    (x + rx == tty->sx && tty_bidi_regions(tty))) &&
+	    px < i + rx && px + nx >= i + rx) {
 		tty_bidi_close(tty, ctx->s, i, py, rx, x + rx, ry);
 		if (!tty_bidi_regions(tty) &&
 		    status_side_at_column(tty->client) > 0 &&
@@ -1938,6 +1959,8 @@ tty_cmd_insertcharacter(struct tty *tty, const struct tty_ctx *ctx)
 	if ((ctx->flags & TTY_CTX_WINDOW_BIGGER) ||
 	    !tty_full_width(tty, ctx) ||
 	    tty_fake_bce(tty, &ctx->defaults, ctx->bg) ||
+	    (tty_bidi_regions(tty) &&
+	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE)) ||
 	    (!tty_term_has(tty->term, TTYC_ICH) &&
 	    !tty_term_has(tty->term, TTYC_ICH1))) {
 		tty_draw_pane(tty, ctx, ctx->ocy);
@@ -1957,6 +1980,8 @@ tty_cmd_deletecharacter(struct tty *tty, const struct tty_ctx *ctx)
 	if ((ctx->flags & TTY_CTX_WINDOW_BIGGER) ||
 	    !tty_full_width(tty, ctx) ||
 	    tty_fake_bce(tty, &ctx->defaults, ctx->bg) ||
+	    (tty_bidi_regions(tty) &&
+	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE)) ||
 	    (!tty_term_has(tty->term, TTYC_DCH) &&
 	    !tty_term_has(tty->term, TTYC_DCH1))) {
 		tty_draw_pane(tty, ctx, ctx->ocy);
@@ -2292,6 +2317,13 @@ tty_cmd_alignmenttest(struct tty *tty, const struct tty_ctx *ctx)
 		return;
 	}
 
+	if (tty_bidi_regions(tty) &&
+	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE)) {
+		for (j = 0; j < ctx->sy; j++)
+			tty_draw_pane(tty, ctx, j);
+		return;
+	}
+
 	tty_attributes(tty, &grid_default_cell, &ctx->style_ctx);
 
 	tty_region_pane(tty, ctx, 0, ctx->sy - 1);
@@ -2317,6 +2349,17 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 	 */
 	if ((ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) &&
 	    tty_bidi_has_control(&ctx->cell->data)) {
+		tty_draw_pane(tty, ctx, ctx->ocy);
+		return;
+	}
+
+	/*
+	 * With isolate regions the initiator for column 0 must be written
+	 * before that cell, so redraw the line.
+	 */
+	if (tty_bidi_regions(tty) &&
+	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) &&
+	    ctx->xoff + ctx->ocx - ctx->wox == 0) {
 		tty_draw_pane(tty, ctx, ctx->ocy);
 		return;
 	}
@@ -2361,6 +2404,13 @@ tty_cmd_cells(struct tty *tty, const struct tty_ctx *ctx)
 			tty_draw_pane(tty, ctx, ctx->ocy);
 		else
 			ctx->redraw_cb(ctx, ctx->ocy, 1);
+		return;
+	}
+
+	if (tty_bidi_regions(tty) &&
+	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) &&
+	    ctx->xoff + ctx->ocx - ctx->wox == 0) {
+		tty_draw_pane(tty, ctx, ctx->ocy);
 		return;
 	}
 
