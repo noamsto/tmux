@@ -1124,6 +1124,8 @@ screen_write_mode_set(struct screen_write_ctx *ctx, int mode)
 {
 	struct screen	*s = ctx->s;
 
+	if (mode & BIDI_MODES & ~s->mode)
+		screen_write_lead_clear(ctx);
 	s->mode |= mode;
 
 	if (log_get_level() != 0)
@@ -1136,6 +1138,8 @@ screen_write_mode_clear(struct screen_write_ctx *ctx, int mode)
 {
 	struct screen	*s = ctx->s;
 
+	if (mode & BIDI_MODES & s->mode)
+		screen_write_lead_clear(ctx);
 	s->mode &= ~mode;
 
 	if (log_get_level() != 0)
@@ -1685,6 +1689,9 @@ screen_write_insertcharacter(struct screen_write_ctx *ctx, u_int nx, u_int bg)
 	struct screen	*s = ctx->s;
 	struct tty_ctx	 ttyctx;
 
+	if (s->cx == 0)
+		screen_write_lead_clear(ctx);
+
 	if (nx == 0)
 		nx = 1;
 
@@ -1726,6 +1733,9 @@ screen_write_deletecharacter(struct screen_write_ctx *ctx, u_int nx, u_int bg)
 {
 	struct screen	*s = ctx->s;
 	struct tty_ctx	 ttyctx;
+
+	if (s->cx == 0)
+		screen_write_lead_clear(ctx);
 
 	if (nx == 0)
 		nx = 1;
@@ -1814,6 +1824,8 @@ screen_write_insertline(struct screen_write_ctx *ctx, u_int ny, u_int bg)
 	struct grid	*gd = s->grid;
 	struct tty_ctx	 ttyctx;
 
+	screen_write_lead_clear(ctx);
+
 	if (ny == 0)
 		ny = 1;
 
@@ -1856,6 +1868,8 @@ screen_write_deleteline(struct screen_write_ctx *ctx, u_int ny, u_int bg)
 	struct grid	*gd = s->grid;
 	struct tty_ctx	 ttyctx;
 	u_int		 ry;
+
+	screen_write_lead_clear(ctx);
 
 	if (ny == 0)
 		ny = 1;
@@ -3228,6 +3242,7 @@ void
 screen_write_cell(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 {
 	struct screen		*s = ctx->s;
+	struct grid		*gd = s->grid;
 	struct grid_cell	 lgc;
 	u_int			 n = s->lead.size;
 
@@ -3243,13 +3258,16 @@ screen_write_cell(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 
 	/*
 	 * Store the kept controls before the char so every redraw writes them
-	 * at column 0 ahead of it, where the terminal applies them. A wide cell
-	 * takes no kept control, so they are dropped.
+	 * at column 0 ahead of it, where the terminal applies them. A cell the
+	 * terminal makes wide takes no kept control, and on a row continuing a
+	 * wrapped line the terminal stores them with the row above, so then
+	 * they are dropped.
 	 */
 	if (s->cx != 0 ||
 	    s->cy != s->lead_cy ||
-	    gc->data.width > 1 ||
-	    (gc->flags & GRID_FLAG_TAB) ||
+	    !tty_bidi_narrow(gc) ||
+	    (s->cy != 0 && (grid_get_line(gd, gd->hsize + s->cy - 1)->flags &
+	    GRID_LINE_WRAPPED)) ||
 	    n + gc->data.size >= UTF8_SIZE) {
 		screen_write_cell1(ctx, gc, 0);
 		return;

@@ -743,20 +743,17 @@ tty_bidi_lead_size(const struct grid_cell *gc)
 }
 
 /*
- * Will the terminal keep the isolate controls at the front of the cell when it
- * is written at terminal column col? It keeps them only with the bidi mode, at
- * column 0 and for a single-width cell. U+FE0F makes the terminal widen the
- * cell even if tmux does not.
+ * Does the terminal keep a control written at column 0 before this cell? Only
+ * for a cell it makes one column wide: U+FE0F widens a cell even if tmux does
+ * not, and the terminal gives a lone regional indicator two columns.
  */
 int
-tty_bidi_lead_ok(struct tty *tty, const struct grid_cell *gc, u_int col)
+tty_bidi_narrow(const struct grid_cell *gc)
 {
 	const struct utf8_data	*ud = &gc->data;
-	u_int			 i;
+	u_int			 i, n;
 
-	if ((~tty->flags & TTY_BIDI) || col != 0 || ud->width != 1)
-		return (0);
-	if (gc->flags & (GRID_FLAG_PADDING|GRID_FLAG_TAB))
+	if (ud->width != 1 || (gc->flags & (GRID_FLAG_PADDING|GRID_FLAG_TAB)))
 		return (0);
 	for (i = 0; i + 2 < ud->size; i++) {
 		if (ud->data[i] == 0xef &&
@@ -764,7 +761,28 @@ tty_bidi_lead_ok(struct tty *tty, const struct grid_cell *gc, u_int col)
 		    ud->data[i + 2] == 0x8f)
 			return (0);
 	}
+	n = tty_bidi_lead_size(gc);
+	if (n + 3 < ud->size &&
+	    ud->data[n] == 0xf0 &&
+	    ud->data[n + 1] == 0x9f &&
+	    ud->data[n + 2] == 0x87 &&
+	    ud->data[n + 3] >= 0xa6 &&
+	    ud->data[n + 3] <= 0xbf)
+		return (0);
 	return (1);
+}
+
+/*
+ * Will the terminal keep the isolate controls at the front of the cell when it
+ * is written at terminal column col? Only with the bidi mode, at column 0 and
+ * for a cell it makes one column wide.
+ */
+int
+tty_bidi_lead_ok(struct tty *tty, const struct grid_cell *gc, u_int col)
+{
+	if ((~tty->flags & TTY_BIDI) || col != 0)
+		return (0);
+	return (tty_bidi_narrow(gc));
 }
 
 /*

@@ -16,7 +16,8 @@ TMUX="$TEST_TMUX -LtestA$$ -f/dev/null"
 TMUX2="$TEST_TMUX -LtestB$$ -f/dev/null"
 
 TMP=$(mktemp)
-trap 'rm -f "$TMP"; $TMUX kill-server 2>/dev/null; $TMUX2 kill-server 2>/dev/null' \
+RAW=$(mktemp)
+trap 'rm -f "$TMP" "$RAW"; $TMUX kill-server 2>/dev/null; $TMUX2 kill-server 2>/dev/null' \
 	0 1 15
 
 exit_status=0
@@ -27,10 +28,11 @@ LRI='\0342\0201\0246'
 A10=aaaaaaaaaa
 A80=$A10$A10$A10$A10$A10$A10$A10$A10
 
-# inner <case> <pane_output> <split>
+# inner <case> <pane_output> <split> [raw_file]
 #   Show pane_output in the first pane of an inner session (split in two side
 #   by side panes if split is 1), attach an inner client to it from an outer
-#   pane and set captured to the outer pane.
+#   pane and set captured to the outer pane. With raw_file, the bytes the
+#   inner client writes for the refresh are also saved there.
 inner() {
 	$TMUX kill-server 2>/dev/null
 	$TMUX2 kill-server 2>/dev/null
@@ -45,6 +47,8 @@ inner() {
 	sleep 1
 	$TMUX new -d -x80 -y5 "TMUX= $TMUX2 attach" || exit 1
 	sleep 1
+	: >"$RAW"
+	[ -n "$4" ] && { $TMUX pipe-pane -O -t0:0.0 "cat >>'$4'" || exit 1; }
 	$TMUX2 refresh-client -t "$($TMUX2 list-clients -F '#{client_name}')" ||
 		exit 1
 	sleep 1
@@ -80,9 +84,9 @@ check 1 "\033[8h\033[?2501hשלום world" "${FSI}ש"
 # on, not before it.
 check 2 "\033[8h\033[?2501h❯ ${FSI}אני " "${FSI}❯ ${FSI}אני ${PDI}"
 
-# A lead at column 0 of a row below a soft-wrapped full row is written after
-# the wrap, not at the end of the full row where the terminal is in pending
-# wrap.
+# A control at column 0 of a row the pane soft-wrapped into is not kept (the
+# terminal alone would not keep it there either), and is never written at the
+# end of the full row above, where the terminal is in pending wrap.
 inner 3 "\033[8h\033[?2501h${A80}b\r${LRI}c" 0 && {
 	row1=$(printf '%s\n' "$captured" | sed -n 1p)
 	row2=$(printf '%s\n' "$captured" | sed -n 2p)
@@ -90,28 +94,30 @@ inner 3 "\033[8h\033[?2501h${A80}b\r${LRI}c" 0 && {
 		echo "[FAIL] case 3: expected row 1 of 80 a, got '$row1'"
 		exit_status=1
 	}
-	expected=$(printf '%b' "${LRI}c")
-	case $row2 in
-	"$expected"*) ;;
-	*)
-		echo "[FAIL] case 3: expected row 2 to start with '$expected'," \
-		    "got '$row2'"
+	[ "$row2" = "c" ] || {
+		echo "[FAIL] case 3: expected row 2 'c', got '$row2'"
 		exit_status=1
-		;;
-	esac
+	}
 }
 
 # A lead the terminal does not keep (the control before a VS16 widened cell)
-# is neither written nor counted, so the row has exactly one closing PDI (the
-# left segment's; the right pane is the rightmost segment).
-inner 4 "\033[8h\033[?2501h${LRI}☀️ abc" 1 && {
+# is not written (checked on the bytes the inner client sends before the first
+# border, as the outer tmux would drop it itself; the right pane's own
+# initiator after the border is an LRI) and not counted, so the row has exactly one
+# closing PDI (the left segment's; the right pane is the rightmost segment).
+inner 4 "\033[8h\033[?2501h${LRI}☀️ abc" 1 "$RAW" && {
 	row1=$(printf '%s\n' "$captured" | sed -n 1p)
-	case $row1 in
-	"$(printf '%b' "$LRI")"*)
-		echo "[FAIL] case 4: row 1 starts with the pane's LRI"
+	left=$(LC_ALL=C sed "s/.*$(printf '\033')\[1;1H//; s/$(printf '\342\224\202').*//" "$RAW")
+	case $left in
+	*"$(printf '%b' "$LRI")"*)
+		echo "[FAIL] case 4: the inner client wrote the pane's LRI"
 		exit_status=1
 		;;
 	esac
+	[ -s "$RAW" ] || {
+		echo "[FAIL] case 4: the inner client's refresh was not captured"
+		exit_status=1
+	}
 	pdis=$(printf '%s' "$row1" | grep -o "$(printf '%b' "$PDI")" | wc -l)
 	[ "$pdis" -eq 1 ] || {
 		echo "[FAIL] case 4: expected 1 PDI in row 1, got $pdis"

@@ -24,6 +24,8 @@ PDI='\0342\0201\0251'
 LRI='\0342\0201\0246'
 SUN='\0342\0230\0200'
 VS16='\0357\0270\0217'
+A10=aaaaaaaaaa
+A40=$A10$A10$A10$A10
 
 # check <case> <pane_output> <rows> <expected>
 #   Show pane_output in a 40x5 pane, then compare rows (a sed address, 1-based)
@@ -58,6 +60,18 @@ check 4 "\033[8h\033[5;1H${PDI}\r\nx" 5 "x"
 # cell drops the control the cell already holds.
 check 5 "\033[8h${PDI}漢abc" 1 "漢abc"
 check 6 "\033[8h${LRI}${SUN}${VS16}abc" 1 "${SUN}${VS16}abc"
+
+# The control is not kept once an insert or delete line, a change of mode or an
+# insert character over a non-blank cell touches the row before the next
+# character: it must not survive onto text it no longer leads.
+check 7 "\033[8h${LRI}\033[La" 1 "a"
+check 8 "\033[8h${LRI}\033[Mb" 1 "b"
+check 9 "\033[8hx\r${LRI}\033[@c" 1 "cx"
+check 10 "\033[8h${LRI}\033[8la" 1 "a"
+
+# A row the cursor reached by wrapping continues the row above, where the
+# control cannot lead it, so it is not kept.
+check 11 "\033[8h${A40}b\r${LRI}c" 2 "c"
 
 $TMUX kill-server 2>/dev/null
 

@@ -143,7 +143,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	const struct grid_cell	*gcp;
 	struct grid_cell	 gc, ngc, last;
 	struct grid_line	*gl;
-	u_int			 i, j, last_i, cx, ex, width, n;
+	u_int			 i, j, last_i, cx, ex, width;
 	u_int			 cellsize, bg;
 	int			 flags, empty, wrapped = 0, spaces, strip = 0;
 	int			 lead;
@@ -230,11 +230,12 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 
 	/*
 	 * The terminal keeps a control written at column 0 for the next cell
-	 * written there. A wide cell takes none, so the control goes after it.
+	 * written there. A cell it makes wide takes none, so the control goes
+	 * after it.
 	 */
 	lead = 0;
 	if ((style_ctx->bidi & TTY_STYLE_BIDI_ISOLATE) && atx == 0) {
-		if (cx != 0 || gc.data.width <= 1)
+		if (cx != 0 || tty_bidi_narrow(&gc))
 			tty_bidi_isolate(tty, style_ctx->bidi, 0, aty);
 		else
 			lead = 1;
@@ -280,20 +281,14 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	}
 
 	/*
-	 * Controls written now would land on the row above, which the terminal
-	 * is waiting to wrap from. Write the first cell without them to wrap
-	 * onto this row, then return to column 0 to write it with them.
+	 * On a row the terminal wrapped onto, it stores controls written at
+	 * column 0 with the row above, so position the cursor explicitly.
 	 */
 	if (wrapped && !strip) {
 		grid_view_get_cell(gd, px, py, &gc);
-		n = tty_bidi_lead_size(&gc);
-		if (n != 0 && tty_bidi_lead_ok(tty, &gc, 0)) {
-			tty_attributes(tty, &gc, style_ctx);
-			tty_putn(tty, gc.data.data + n, gc.data.size - n,
-			    gc.data.width);
-			tty_cursor(tty, 0, aty);
+		if (tty_bidi_lead_size(&gc) != 0 &&
+		    tty_bidi_lead_ok(tty, &gc, 0))
 			wrapped = 0;
-		}
 	}
 
 	/* Loop over each character in the range. */
