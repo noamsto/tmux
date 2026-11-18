@@ -27,12 +27,14 @@ PDI='\0342\0201\0251'
 LRI='\0342\0201\0246'
 A10=aaaaaaaaaa
 A80=$A10$A10$A10$A10$A10$A10$A10$A10
+RIGHT='sleep 100'
 
 # inner <case> <pane_output> <split> [raw_file]
 #   Show pane_output in the first pane of an inner session (split in two side
-#   by side panes if split is 1), attach an inner client to it from an outer
-#   pane and set captured to the outer pane. With raw_file, the bytes the
-#   inner client writes for the refresh are also saved there.
+#   by side panes if split is 1, the second showing $RIGHT), attach an inner
+#   client to it from an outer pane and set captured to the outer pane. With
+#   raw_file, the bytes the inner client writes for the refresh are also saved
+#   there.
 inner() {
 	$TMUX kill-server 2>/dev/null
 	$TMUX2 kill-server 2>/dev/null
@@ -43,7 +45,7 @@ inner() {
 	$TMUX2 set -g status off || exit 1
 	$TMUX2 set -g window-size manual || exit 1
 	$TMUX2 set -as terminal-features '*:bidi' || exit 1
-	[ "$3" = 1 ] && { $TMUX2 splitw -h 'sleep 100' || exit 1; }
+	[ "$3" = 1 ] && { $TMUX2 splitw -h "$RIGHT" || exit 1; }
 	sleep 1
 	$TMUX new -d -x80 -y5 "TMUX= $TMUX2 attach" || exit 1
 	sleep 1
@@ -81,12 +83,13 @@ check() {
 check 1 "\033[8h\033[?2501hשלום world" "${FSI}ש"
 
 # The closing isolate of the pane's own FSI goes after the space the cursor is
-# on, not before it.
-check 2 "\033[8h\033[?2501h❯ ${FSI}אני " "${FSI}❯ ${FSI}אני ${PDI}"
+# on, not before it. The prompt glyph is not one tmux and the terminal are
+# known to give the same width, so the inner isolate follows it.
+check 2 "\033[8h\033[?2501h❯ ${FSI}אני " "❯${FSI} ${FSI}אני ${PDI}"
 
-# A control at column 0 of a row the pane soft-wrapped into is not kept (the
-# terminal alone would not keep it there either), and is never written at the
-# end of the full row above, where the terminal is in pending wrap.
+# The pane's control at column 0 of a row it soft-wrapped into is dropped (the
+# terminal alone would not keep it there): row 1 stays the 80 a (no control at
+# its end, where the terminal is in pending wrap) and row 2 is just the c.
 inner 3 "\033[8h\033[?2501h${A80}b\r${LRI}c" 0 && {
 	row1=$(printf '%s\n' "$captured" | sed -n 1p)
 	row2=$(printf '%s\n' "$captured" | sed -n 2p)
@@ -124,5 +127,12 @@ inner 4 "\033[8h\033[?2501h${LRI}☀️ abc" 1 "$RAW" && {
 		exit_status=1
 	}
 }
+
+# A first cell the terminal may measure differently (the pointing hand) is not
+# led by the inner client's own isolate: it goes after the cell, which the
+# outer pane then stores with the cell. The right pane is in BDSM, so the
+# inner client writes isolates at all although the left pane is not.
+RIGHT="printf '\\033[8h\\033[?2501h'; sleep 100"
+check 5 "☝ abc" "☝${LRI}"
 
 exit $exit_status

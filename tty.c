@@ -744,61 +744,59 @@ tty_bidi_lead_size(const struct grid_cell *gc)
 
 /*
  * Does the terminal keep a control written at column 0 before this cell? Only
- * for a cell it makes one column wide: U+FE0F widens a cell even if tmux does
- * not, and the terminal gives a lone regional indicator two columns.
+ * for a cell holding one character from a short list where tmux and the
+ * terminal agree it is one column wide: for a cell the terminal makes another
+ * width, it drops the control.
  */
 int
-tty_bidi_narrow(const struct grid_cell *gc)
+tty_bidi_agree(const struct grid_cell *gc)
 {
 	const struct utf8_data	*ud = &gc->data;
-	u_int			 i, n;
+	const u_char		*cp;
+	u_int			 n, c;
 
 	if (ud->width != 1 || (gc->flags & (GRID_FLAG_PADDING|GRID_FLAG_TAB)))
 		return (0);
-	for (i = 0; i + 2 < ud->size; i++) {
-		if (ud->data[i] == 0xef &&
-		    ud->data[i + 1] == 0xb8 &&
-		    ud->data[i + 2] == 0x8f)
-			return (0);
-	}
 	n = tty_bidi_lead_size(gc);
-	if (n + 3 < ud->size &&
-	    ud->data[n] == 0xf0 &&
-	    ud->data[n + 1] == 0x9f &&
-	    ud->data[n + 2] == 0x87 &&
-	    ud->data[n + 3] >= 0xa6 &&
-	    ud->data[n + 3] <= 0xbf)
+	cp = ud->data + n;
+	if (ud->size == n + 1)
+		c = cp[0];
+	else if (ud->size == n + 2 && (cp[0] & 0xe0) == 0xc0)
+		c = ((cp[0] & 0x1f) << 6)|(cp[1] & 0x3f);
+	else
 		return (0);
-	return (1);
+	return ((c >= 0x20 && c <= 0x7e) ||
+	    (c >= 0xc0 && c <= 0x24f) ||
+	    (c >= 0x386 && c <= 0x4ff) ||
+	    (c >= 0x5d0 && c <= 0x5ea) ||
+	    (c >= 0x620 && c <= 0x64a));
 }
 
 /*
  * Will the terminal keep the isolate controls at the front of the cell when it
  * is written at terminal column col? Only with the bidi mode, at column 0 and
- * for a cell it makes one column wide.
+ * for a cell whose width tmux and the terminal agree on.
  */
 int
 tty_bidi_lead_ok(struct tty *tty, const struct grid_cell *gc, u_int col)
 {
 	if ((~tty->flags & TTY_BIDI) || col != 0)
 		return (0);
-	return (tty_bidi_narrow(gc));
+	return (tty_bidi_agree(gc));
 }
 
 /*
  * Remove the isolate controls a pane printed at column 0 from the front of the
- * cell unless the terminal will keep them when the cell is written at col.
- * Otherwise a terminal without the bidi mode would get bytes upstream never
- * sent, and elsewhere the terminal would store them with another cell.
+ * cell. Callers do so unless the terminal will keep them: otherwise a terminal
+ * without the bidi mode would get bytes upstream never sent, and elsewhere the
+ * terminal would store them with another cell.
  */
 void
-tty_bidi_unlead(struct tty *tty, struct grid_cell *gc, u_int col)
+tty_bidi_unlead(struct grid_cell *gc)
 {
 	struct utf8_data	*ud = &gc->data;
 	u_int			 n = tty_bidi_lead_size(gc);
 
-	if (n == 0 || tty_bidi_lead_ok(tty, gc, col))
-		return;
 	ud->size -= n;
 	memmove(ud->data, ud->data + n, ud->size);
 }
@@ -821,14 +819,14 @@ tty_bidi_has_control(const struct utf8_data *ud)
 
 /*
  * Count the isolates the pane's own text leaves open in cells px to px + nx - 1
- * of line py, drawn from terminal column atx. Also return the cell after the
- * last non-blank one, the number of isolate controls seen and the number of
- * PDIs with no initiator. Leading controls tty_bidi_unlead removes are not
- * written, so they are not counted.
+ * of line py of an isolated pane. Also return the cell after the last
+ * non-blank one, the number of isolate controls seen and the number of PDIs
+ * with no initiator. An isolated row never keeps leading controls, so they
+ * are not counted.
  */
 static u_int
-tty_bidi_scan(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
-    u_int atx, u_int *last, u_int *controls, u_int *unmatched)
+tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int *last,
+    u_int *controls, u_int *unmatched)
 {
 	struct grid_cell	 gc;
 	const u_char		*cp;
@@ -844,11 +842,7 @@ tty_bidi_scan(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 		    gc.data.data[0] != ' ')
 			*last = i - px + 1;
 		cp = gc.data.data;
-		if (tty_bidi_lead_ok(tty, &gc, atx + (i - px)))
-			j = 0;
-		else
-			j = tty_bidi_lead_size(&gc);
-		for (; j + 2 < gc.data.size; j++) {
+		for (j = tty_bidi_lead_size(&gc); j + 2 < gc.data.size; j++) {
 			if (cp[j] != 0xe2 || cp[j + 1] != 0x81)
 				continue;
 			if (cp[j + 2] >= 0xa6 && cp[j + 2] <= 0xa8) {
@@ -873,13 +867,11 @@ tty_bidi_scan(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
  * pane, so then they are all dropped.
  */
 int
-tty_bidi_keep(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
-    u_int atx)
+tty_bidi_keep(struct screen *s, u_int px, u_int py, u_int nx)
 {
 	u_int	last, controls, unmatched, depth;
 
-	depth = tty_bidi_scan(tty, s, px, py, nx, atx, &last, &controls,
-	    &unmatched);
+	depth = tty_bidi_scan(s, px, py, nx, &last, &controls, &unmatched);
 	return (controls + depth <= 2 && unmatched == 0);
 }
 
@@ -896,8 +888,8 @@ tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
 	u_int	i, last = nx, controls, unmatched, depth = 0;
 
 	if (s != NULL) {
-		depth = tty_bidi_scan(tty, s, px, py, nx, x - nx, &last,
-		    &controls, &unmatched);
+		depth = tty_bidi_scan(s, px, py, nx, &last, &controls,
+		    &unmatched);
 		if (controls + depth > 2 || unmatched != 0)
 			depth = 0;
 		else if (depth > 0 && cx != UINT_MAX && cy == py && cx > px &&
@@ -1849,8 +1841,7 @@ tty_draw_pane(struct tty *tty, const struct tty_ctx *ctx, u_int py)
  * Fix the isolate controls after a partial write. A line holding isolate
  * controls of its own is redrawn whole because the controls closing them follow
  * the last non-blank cell, which moves as text is written. So is a write at
- * terminal column 0, where the initiator and the first cell's own controls are
- * written together.
+ * terminal column 0, where the initiator goes before or after the first cell.
  */
 static void
 tty_bidi_partial(struct tty *tty, const struct tty_ctx *ctx, u_int py,
@@ -1863,8 +1854,7 @@ tty_bidi_partial(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return;
 
-	tty_bidi_scan(tty, ctx->s, i, py, rx, x, &last, &controls,
-	    &unmatched);
+	tty_bidi_scan(ctx->s, i, py, rx, &last, &controls, &unmatched);
 	if (controls != 0 || (x == 0 && px <= i && px + nx > i))
 		tty_draw_pane(tty, ctx, py);
 	else
@@ -2410,7 +2400,8 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 	 * terminal waits to wrap from the row above.
 	 */
 	memcpy(&gc, ctx->cell, sizeof gc);
-	tty_bidi_unlead(tty, &gc, x);
+	if (!tty_bidi_lead_ok(tty, &gc, x))
+		tty_bidi_unlead(&gc);
 	if (tty_bidi_lead_size(&gc) != 0)
 		tty_cursor_pane(tty, ctx, ctx->ocx, ctx->ocy);
 	else

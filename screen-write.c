@@ -3258,14 +3258,14 @@ screen_write_cell(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 
 	/*
 	 * Store the kept controls before the char so every redraw writes them
-	 * at column 0 ahead of it, where the terminal applies them. A cell the
-	 * terminal makes wide takes no kept control, and on a row continuing a
-	 * wrapped line the terminal stores them with the row above, so then
-	 * they are dropped.
+	 * at column 0 ahead of it, where the terminal applies them. The
+	 * terminal drops them before a cell whose width it may see
+	 * differently, and on a row continuing a wrapped line it stores them
+	 * with the row above, so then they are dropped.
 	 */
 	if (s->cx != 0 ||
 	    s->cy != s->lead_cy ||
-	    !tty_bidi_narrow(gc) ||
+	    !tty_bidi_agree(gc) ||
 	    (s->cy != 0 && (grid_get_line(gd, gd->hsize + s->cy - 1)->flags &
 	    GRID_LINE_WRAPPED)) ||
 	    n + gc->data.size >= UTF8_SIZE) {

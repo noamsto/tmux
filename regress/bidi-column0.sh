@@ -62,12 +62,13 @@ check 5 "\033[8h${PDI}漢abc" 1 "漢abc"
 check 6 "\033[8h${LRI}${SUN}${VS16}abc" 1 "${SUN}${VS16}abc"
 
 # The control is not kept once an insert or delete line, a change of mode or an
-# insert character over a non-blank cell touches the row before the next
+# insert or delete character at column 0 touches the row before the next
 # character: it must not survive onto text it no longer leads.
 check 7 "\033[8h${LRI}\033[La" 1 "a"
 check 8 "\033[8h${LRI}\033[Mb" 1 "b"
 check 9 "\033[8hx\r${LRI}\033[@c" 1 "cx"
 check 10 "\033[8h${LRI}\033[8la" 1 "a"
+check 12 "\033[8h${LRI}\033[Pc" 1 "c"
 
 # A row the cursor reached by wrapping continues the row above, where the
 # control cannot lead it, so it is not kept.
