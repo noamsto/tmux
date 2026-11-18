@@ -146,6 +146,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	u_int			 i, j, last_i, cx, ex, width;
 	u_int			 cellsize, bg;
 	int			 flags, empty, wrapped = 0, spaces, strip = 0;
+	int			 after;
 	char			 buf[1000];
 	size_t			 len;
 	enum tty_draw_line_state current_state, next_state;
@@ -226,6 +227,19 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 #endif
 		cx++;
 	}
+
+	/*
+	 * The terminal keeps a control written at column 0 for the next cell
+	 * written there, but drops it before a cell whose width it may see
+	 * differently, so then the control goes after that cell.
+	 */
+	after = 0;
+	if ((style_ctx->bidi & TTY_STYLE_BIDI_ISOLATE) && atx == 0) {
+		if (cx != 0 || tty_bidi_agree(&gc))
+			tty_bidi_isolate(tty, style_ctx->bidi, 0, aty);
+		else
+			after = 1;
+	}
 	if (cx != 0) {
 		/* Find the previous cell for the background colour. */
 		for (i = px + 1; i > 0; i--) {
@@ -266,6 +280,17 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 			wrapped = 1;
 	}
 
+	/*
+	 * On a row the terminal wrapped onto, it stores controls written at
+	 * column 0 with the row above, so position the cursor explicitly.
+	 */
+	if (wrapped && (~style_ctx->bidi & TTY_STYLE_BIDI_ISOLATE)) {
+		grid_view_get_cell(gd, px, py, &gc);
+		if (tty_bidi_lead_size(&gc) != 0 &&
+		    tty_bidi_lead_ok(tty, &gc, 0))
+			wrapped = 0;
+	}
+
 	/* Loop over each character in the range. */
 	last_i = i = 0;
 	len = 0;
@@ -303,6 +328,10 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 			} else {
 				/* Get the current cell. */
 				grid_view_get_cell(gd, px + i, py, &gc);
+				if ((style_ctx->bidi &
+				    TTY_STYLE_BIDI_ISOLATE) ||
+				    !tty_bidi_lead_ok(tty, &gc, atx + i))
+					tty_bidi_unlead(&gc);
 				gcp = &gc;
 
 #ifdef ENABLE_IMAGES
@@ -401,6 +430,9 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 		else
 			i += gcp->data.width;
 	}
+
+	if (after)
+		tty_bidi_isolate(tty, style_ctx->bidi, 1, aty);
 
 out:
 	tty->flags = (tty->flags & ~TTY_NOCURSOR)|flags;

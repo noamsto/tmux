@@ -1157,6 +1157,9 @@ struct screen {
 	int				 saved_flags;
 	int				 saved_bidi;
 
+	struct utf8_data		 lead;
+	u_int				 lead_cy;
+
 	bitstr_t			*tabs;
 	struct screen_sel		*sel;
 
@@ -2010,6 +2013,13 @@ struct tty_ctx {
 	 */
 	u_int			 ocx;
 	u_int			 ocy;
+
+	/*
+	 * The pane cursor; ocx and ocy are not it while collected runs are
+	 * flushed.
+	 */
+	u_int			 cursor_x;
+	u_int			 cursor_y;
 
 	u_int			 orupper;
 	u_int			 orlower;
@@ -3105,8 +3115,12 @@ int	tty_pane_bidi(struct window_pane *);
 void	tty_set_bidi(struct tty *, int);
 void	tty_set_bidi_ctx(struct tty *, struct tty_ctx *);
 void	tty_bidi_isolate(struct tty *, int, u_int, u_int);
+u_int	tty_bidi_lead_size(const struct grid_cell *);
+int	tty_bidi_agree(const struct grid_cell *);
+int	tty_bidi_lead_ok(struct tty *, const struct grid_cell *, u_int);
+void	tty_bidi_unlead(struct grid_cell *);
 void	tty_bidi_close(struct tty *, struct screen *, u_int, u_int, u_int,
-	    u_int, u_int);
+	    u_int, u_int, u_int, u_int);
 int	tty_bidi_keep(struct screen *, u_int, u_int, u_int);
 void	tty_set_selection(struct tty *, const char *, const char *, size_t);
 void	tty_write(void (*)(struct tty *, const struct tty_ctx *),

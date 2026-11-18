@@ -1406,7 +1406,6 @@ redraw_find_span(struct redraw_line *line, u_int x)
 
 /*
  * Write the isolate controls held by the cells of a span that was just drawn:
- * its own initiator if it starts at column 0 (there is no cell to its left),
  * its PDIs in its last cell, then the initiator of the span to its right. A
  * pane span drawn from a prompt screen instead of its own passes that screen.
  */
@@ -1421,6 +1420,7 @@ redraw_bidi_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 	struct redraw_span	*next;
 	struct screen		*s = NULL;
 	u_int			 x0, x1, px = 0, py = 0, n = span->width;
+	u_int			 cx = UINT_MAX, cy = UINT_MAX;
 	int			 bits, next_bits;
 
 	x0 = dctx->side_left + span->x;
@@ -1428,8 +1428,6 @@ redraw_bidi_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 	bits = redraw_bidi_get(dctx, span);
 
 	if (bits & TTY_STYLE_BIDI_ISOLATE) {
-		if (x0 == 0)
-			tty_bidi_isolate(tty, bits, 1, y);
 		if (x1 < tty->sx) {
 			if (prompt != NULL) {
 				s = prompt;
@@ -1458,7 +1456,13 @@ redraw_bidi_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 					break;
 				}
 			}
-			tty_bidi_close(tty, s, px, py, n, x1, y);
+			if (prompt == NULL &&
+			    span->data.type == REDRAW_SPAN_PANE &&
+			    span->data.p.wp->screen == &span->data.p.wp->base) {
+				cx = span->data.p.wp->screen->cx;
+				cy = span->data.p.wp->screen->cy;
+			}
+			tty_bidi_close(tty, s, px, py, n, x1, y, cx, cy);
 		}
 	}
 	if (x1 >= tty->sx || (line = redraw_get_line(dctx, y)) == NULL)
@@ -2169,8 +2173,8 @@ redraw_bidi_side_status(struct redraw_draw_ctx *dctx, u_int y, u_int row)
 	if (status_side_at_column(c) != 0)
 		return;
 
-	tty_bidi_isolate(tty, TTY_STYLE_BIDI_ISOLATE, 1, y);
-	tty_bidi_close(tty, &c->side_status.screen, 0, row, width, width, y);
+	tty_bidi_close(tty, &c->side_status.screen, 0, row, width, width, y,
+	    UINT_MAX, UINT_MAX);
 	if ((span = redraw_find_span(line, 0)) == NULL)
 		return;
 	bits = redraw_bidi_get(dctx, span);
