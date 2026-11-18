@@ -2364,8 +2364,9 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 
 	/*
 	 * With isolate regions the initiator for column 0 must be written
-	 * before that cell, and invalidating the cursor would lose the
-	 * pending wrap the closing PDI needs, so redraw the line.
+	 * before that cell, and invalidating the cursor before the write
+	 * would lose the pending wrap the closing PDI needs, so redraw the
+	 * line.
 	 */
 	if (tty_bidi_regions(tty) &&
 	    (ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) &&
