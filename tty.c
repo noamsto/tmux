@@ -391,7 +391,7 @@ tty_start_tty(struct tty *tty)
 	}
 	tty->flags &= ~(TTY_BIDI|TTY_BIDIAUTO|TTY_BIDIRTL);
 	if (!options_get_number(global_options, "clear-on-attach") &&
-	    tty_has_bidi(tty)) {
+	    tty_has_bidi(tty) && !tty_bidi_regions(tty)) {
 		/*
 		 * Without SMCUP the terminal keeps its bidi modes, so make the
 		 * first redraw set them.
@@ -558,9 +558,11 @@ tty_stop_tty(struct tty *tty)
 	if (tty_use_margin(tty))
 		tty_raw(tty, tty_term_string(tty->term, TTYC_DSMG));
 	if (tty->flags & TTY_BIDI) {
-		tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDA));
-		tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDR));
-		tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDI));
+		if (!tty_bidi_regions(tty)) {
+			tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDA));
+			tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDR));
+			tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDI));
+		}
 		tty->flags &= ~(TTY_BIDI|TTY_BIDIAUTO|TTY_BIDIRTL);
 	}
 	if (options_get_number(global_options, "clear-on-attach"))
@@ -668,6 +670,26 @@ tty_pane_bidi(struct window_pane *wp)
 }
 
 /*
+ * Get the bidi style flags for a pane. With isolate regions only bidi panes are
+ * bracketed, so a pane is isolated whether or not it is full width.
+ */
+int
+tty_pane_bidi_bits(struct tty *tty, struct window_pane *wp, int full)
+{
+	int	bits;
+
+	if (tty_bidi_regions(tty)) {
+		if (~wp->base.mode & MODE_BIDI)
+			return (0);
+		return (tty_pane_bidi(wp)|TTY_STYLE_BIDI_ISOLATE);
+	}
+	bits = tty_pane_bidi(wp);
+	if (!full)
+		bits |= TTY_STYLE_BIDI_ISOLATE;
+	return (bits);
+}
+
+/*
  * Turn bidi on or off. The clear makes the terminal forget the bidi state it
  * stored for each line.
  */
@@ -678,6 +700,16 @@ tty_set_bidi(struct tty *tty, int on)
 		return;
 	if (!on && (~tty->flags & TTY_BIDI))
 		return;
+
+	if (tty_bidi_regions(tty)) {
+		if (on)
+			tty->flags |= TTY_BIDI;
+		else
+			tty->flags &= ~TTY_BIDI;
+		tty->flags &= ~(TTY_BIDIAUTO|TTY_BIDIRTL);
+		log_debug("%s: bidi %s", tty->client->name, on ? "on" : "off");
+		return;
+	}
 
 	tty_reset(tty);
 	if (on)
@@ -702,16 +734,13 @@ void
 tty_set_bidi_ctx(struct tty *tty, struct tty_ctx *ctx)
 {
 	struct window_pane	*wp = ctx->arg;
-	int			 bits;
 
 	ctx->style_ctx.bidi = 0;
 	if ((~tty->flags & TTY_BIDI) || wp == NULL)
 		return;
 
-	bits = tty_pane_bidi(wp);
-	if (!tty_full_width(tty, ctx))
-		bits |= TTY_STYLE_BIDI_ISOLATE;
-	ctx->style_ctx.bidi = bits;
+	ctx->style_ctx.bidi = tty_pane_bidi_bits(tty, wp,
+	    tty_full_width(tty, ctx));
 }
 
 /*
@@ -1723,7 +1752,8 @@ tty_bidi_line(struct tty *tty, const struct tty_ctx *ctx, u_int py, u_int px,
 		tty_bidi_isolate(tty, bits, 1, ry);
 	if (x + rx < tty->sx && px < i + rx && px + nx >= i + rx) {
 		tty_bidi_close(tty, ctx->s, i, py, rx, x + rx, ry);
-		if (status_side_at_column(tty->client) > 0 &&
+		if (!tty_bidi_regions(tty) &&
+		    status_side_at_column(tty->client) > 0 &&
 		    (u_int)status_side_at_column(tty->client) == x + rx)
 			tty_bidi_isolate(tty, TTY_STYLE_BIDI_ISOLATE, x + rx,
 			    ry);

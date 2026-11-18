@@ -3104,6 +3104,7 @@ void	tty_update_features(struct tty *);
 int	tty_has_bidi(struct tty *);
 int	tty_bidi_regions(struct tty *);
 int	tty_pane_bidi(struct window_pane *);
+int	tty_pane_bidi_bits(struct tty *, struct window_pane *, int);
 void	tty_set_bidi(struct tty *, int);
 void	tty_set_bidi_ctx(struct tty *, struct tty_ctx *);
 void	tty_bidi_isolate(struct tty *, int, u_int, u_int);

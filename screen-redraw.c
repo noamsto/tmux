@@ -1346,12 +1346,10 @@ redraw_bidi_get(struct redraw_draw_ctx *dctx, struct redraw_span *span)
 
 	switch (span->data.type) {
 	case REDRAW_SPAN_PANE:
-		if (full)
-			return (tty_pane_bidi(span->data.p.wp));
-		return (tty_pane_bidi(span->data.p.wp)|TTY_STYLE_BIDI_ISOLATE);
+		return (tty_pane_bidi_bits(tty, span->data.p.wp, full));
 	case REDRAW_SPAN_MENU:
 	case REDRAW_SPAN_STATUS:
-		if (full)
+		if (tty_bidi_regions(tty) || full)
 			return (0);
 		return (TTY_STYLE_BIDI_ISOLATE);
 	default:
@@ -1467,8 +1465,8 @@ redraw_bidi_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 	next = redraw_find_span(line, span->x + span->width);
 	if (next != NULL)
 		next_bits = redraw_bidi_get(dctx, next);
-	else if (span->x + span->width == scene->sx &&
-	    status_side_at_column(c) > 0)
+	else if (!tty_bidi_regions(tty) &&
+	    span->x + span->width == scene->sx && status_side_at_column(c) > 0)
 		next_bits = TTY_STYLE_BIDI_ISOLATE;
 	else
 		return;
@@ -2169,8 +2167,11 @@ redraw_bidi_side_status(struct redraw_draw_ctx *dctx, u_int y, u_int row)
 	if (status_side_at_column(c) != 0)
 		return;
 
-	tty_bidi_isolate(tty, TTY_STYLE_BIDI_ISOLATE, 1, y);
-	tty_bidi_close(tty, &c->side_status.screen, 0, row, width, width, y);
+	if (!tty_bidi_regions(tty)) {
+		tty_bidi_isolate(tty, TTY_STYLE_BIDI_ISOLATE, 1, y);
+		tty_bidi_close(tty, &c->side_status.screen, 0, row, width,
+		    width, y);
+	}
 	if ((span = redraw_find_span(line, 0)) == NULL)
 		return;
 	bits = redraw_bidi_get(dctx, span);
@@ -2332,7 +2333,8 @@ redraw_draw(struct client *c, struct window_pane *wp, int flags)
 				y = dctx.status_lines;
 			else
 				y = 0;
-			if (dctx.flags & REDRAW_BIDI)
+			if ((dctx.flags & REDRAW_BIDI) &&
+			    !tty_bidi_regions(tty))
 				bidi = TTY_STYLE_BIDI_ISOLATE;
 			else
 				bidi = 0;
@@ -2341,7 +2343,7 @@ redraw_draw(struct client *c, struct window_pane *wp, int flags)
 			for (i = 0; i < status_side_rows(c); i++) {
 				tty_draw_line(tty, &c->side_status.screen, 0, i,
 				    side_width, side_x, y + i, sc);
-				if (sc != NULL)
+				if (dctx.flags & REDRAW_BIDI)
 					redraw_bidi_side_status(&dctx, y + i, i);
 			}
 		}
