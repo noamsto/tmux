@@ -185,7 +185,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 		nx = tty->sx - atx;
 	if (nx == 0)
 		return;
-	if (spaces && !tty_bidi_keep(s, px, py, nx))
+	if (spaces && !tty_bidi_keep(s, px, py, nx, atx))
 		strip = 1;
 
 	/*
@@ -316,7 +316,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 			} else {
 				/* Get the current cell. */
 				grid_view_get_cell(gd, px + i, py, &gc);
-				if (~tty->flags & TTY_BIDI)
+				if ((~tty->flags & TTY_BIDI) || atx + i != 0)
 					tty_bidi_unlead(&gc);
 				gcp = &gc;
 

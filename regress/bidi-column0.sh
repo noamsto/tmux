@@ -11,7 +11,7 @@ LC_ALL=C.UTF-8
 export TERM LC_ALL
 
 [ -z "$TEST_TMUX" ] && TEST_TMUX=$(readlink -f ../tmux)
-TMUX="$TEST_TMUX -Ltest -f/dev/null"
+TMUX="$TEST_TMUX -LtestA$$ -f/dev/null"
 $TMUX kill-server 2>/dev/null
 sleep 1
 
@@ -23,14 +23,21 @@ exit_status=0
 PDI='\0342\0201\0251'
 LRI='\0342\0201\0246'
 
-# check <case> <pane_output> <row> <expected>
-#   Show pane_output in a 40x5 pane, then compare row (1-based) of the
-#   captured pane with expected (printf format).
+# check <case> <pane_output> <rows> <expected>
+#   Show pane_output in a 40x5 pane, then compare rows (a sed address, 1-based)
+#   of the captured pane with expected (printf format).
 check() {
 	printf '%b' "$2" >"$TMP"
 	$TMUX new -d -x40 -y5 "cat '$TMP'; sleep 100" || exit 1
 	sleep 1
-	actual=$($TMUX capture-pane -p -t0:0.0 | sed -n "$3p")
+	captured=$($TMUX capture-pane -p -t0:0.0) || {
+		echo "[FAIL] case $1: capture-pane failed"
+		exit_status=1
+		$TMUX kill-server 2>/dev/null
+		sleep 1
+		return
+	}
+	actual=$(printf '%s\n' "$captured" | sed -n "$3p")
 	expected=$(printf '%b' "$4")
 	$TMUX kill-server 2>/dev/null
 	sleep 1
@@ -42,8 +49,7 @@ check() {
 
 check 1 "\033[8h${PDI}abc" 1 "${PDI}abc"
 check 2 "${PDI}abc" 1 "abc"
-check 3a "\033[8h${LRI}\r\nx" 2 "x"
-check 3b "\033[8h${LRI}\r\nx" 1 ""
+check 3 "\033[8h${LRI}\r\nx" 1,2 "\nx"
 check 4 "\033[8h\033[5;1H${PDI}\r\nx" 5 "x"
 
 $TMUX kill-server 2>/dev/null

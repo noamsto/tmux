@@ -728,7 +728,9 @@ tty_bidi_isolate(struct tty *tty, int bits, u_int x, u_int y)
 
 /*
  * Remove the isolate controls a pane printed at column 0 from the front of the
- * cell. A terminal without the bidi mode would get bytes upstream never sent.
+ * cell. A terminal without the bidi mode would get bytes upstream never sent,
+ * and when the cell is not at terminal column 0 the terminal stores them with
+ * the cell to its left, outside the pane.
  */
 void
 tty_bidi_unlead(struct grid_cell *gc)
@@ -766,12 +768,14 @@ tty_bidi_has_control(const struct utf8_data *ud)
 
 /*
  * Count the isolates the pane's own text leaves open in cells px to px + nx - 1
- * of line py. Also return the cell after the last non-blank one, the number
- * of isolate controls seen and the number of PDIs with no initiator.
+ * of line py, drawn from terminal column atx. Also return the cell after the
+ * last non-blank one, the number of isolate controls seen and the number of
+ * PDIs with no initiator. Leading controls of a cell not at terminal column 0
+ * are not written (tty_bidi_unlead), so they are not counted.
  */
 static u_int
-tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int *last,
-    u_int *controls, u_int *unmatched)
+tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int atx,
+    u_int *last, u_int *controls, u_int *unmatched)
 {
 	struct grid_cell	 gc;
 	const u_char		*cp;
@@ -787,7 +791,16 @@ tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int *last,
 		    gc.data.data[0] != ' ')
 			*last = i - px + 1;
 		cp = gc.data.data;
-		for (j = 0; j + 2 < gc.data.size; j++) {
+		j = 0;
+		if (atx + (i - px) != 0) {
+			while (j + 2 < gc.data.size &&
+			    cp[j] == 0xe2 &&
+			    cp[j + 1] == 0x81 &&
+			    cp[j + 2] >= 0xa6 &&
+			    cp[j + 2] <= 0xa9)
+				j += 3;
+		}
+		for (; j + 2 < gc.data.size; j++) {
 			if (cp[j] != 0xe2 || cp[j + 1] != 0x81)
 				continue;
 			if (cp[j + 2] >= 0xa6 && cp[j + 2] <= 0xa8) {
@@ -812,11 +825,12 @@ tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int *last,
  * pane, so then they are all dropped.
  */
 int
-tty_bidi_keep(struct screen *s, u_int px, u_int py, u_int nx)
+tty_bidi_keep(struct screen *s, u_int px, u_int py, u_int nx, u_int atx)
 {
 	u_int	last, controls, unmatched, depth;
 
-	depth = tty_bidi_scan(s, px, py, nx, &last, &controls, &unmatched);
+	depth = tty_bidi_scan(s, px, py, nx, atx, &last, &controls,
+	    &unmatched);
 	return (controls + depth <= 2 && unmatched == 0);
 }
 
@@ -833,7 +847,7 @@ tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
 	u_int	i, last = nx, controls, unmatched, depth = 0;
 
 	if (s != NULL) {
-		depth = tty_bidi_scan(s, px, py, nx, &last, &controls,
+		depth = tty_bidi_scan(s, px, py, nx, x - nx, &last, &controls,
 		    &unmatched);
 		if (controls + depth > 2 || unmatched != 0)
 			depth = 0;
@@ -1800,7 +1814,7 @@ tty_bidi_partial(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return;
 
-	tty_bidi_scan(ctx->s, i, py, rx, &last, &controls, &unmatched);
+	tty_bidi_scan(ctx->s, i, py, rx, x, &last, &controls, &unmatched);
 	if (controls != 0)
 		tty_draw_pane(tty, ctx, py);
 	else
@@ -2446,7 +2460,8 @@ tty_cell(struct tty *tty, const struct grid_cell *gc,
 	if (gc->flags & GRID_FLAG_PADDING)
 		return;
 
-	if ((~tty->flags & TTY_BIDI) &&
+	/* The cursor is UINT_MAX when unknown, so that counts as not column 0. */
+	if (((~tty->flags & TTY_BIDI) || tty->cx != 0) &&
 	    gc->data.size > 3 &&
 	    gc->data.data[0] == 0xe2) {
 		memcpy(&ugc, gc, sizeof ugc);

@@ -3243,10 +3243,12 @@ screen_write_cell(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 
 	/*
 	 * Store the kept controls before the char so every redraw writes them
-	 * at column 0 ahead of it, where the terminal applies them.
+	 * at column 0 ahead of it, where the terminal applies them. A wide cell
+	 * takes no kept control, so they are dropped.
 	 */
 	if (s->cx != 0 ||
 	    s->cy != s->lead_cy ||
+	    gc->data.width > 1 ||
 	    (gc->flags & GRID_FLAG_TAB) ||
 	    n + gc->data.size >= UTF8_SIZE) {
 		screen_write_cell1(ctx, gc, 0);

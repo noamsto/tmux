@@ -3118,7 +3118,7 @@ void	tty_bidi_isolate(struct tty *, int, u_int, u_int);
 void	tty_bidi_unlead(struct grid_cell *);
 void	tty_bidi_close(struct tty *, struct screen *, u_int, u_int, u_int,
 	    u_int, u_int, u_int, u_int);
-int	tty_bidi_keep(struct screen *, u_int, u_int, u_int);
+int	tty_bidi_keep(struct screen *, u_int, u_int, u_int, u_int);
 void	tty_set_selection(struct tty *, const char *, const char *, size_t);
 void	tty_write(void (*)(struct tty *, const struct tty_ctx *),
 	    struct tty_ctx *);
