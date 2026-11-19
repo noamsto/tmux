@@ -72,6 +72,7 @@ static void	tty_draw_pane(struct tty *, const struct tty_ctx *, u_int);
 static int	tty_bidi_controls(struct tty *, const struct tty_ctx *, u_int);
 static void	tty_bidi_cleared(struct tty *, const struct tty_ctx *, u_int,
 		    u_int, u_int);
+static void	tty_bidi_free_rows(struct tty *);
 
 #define tty_use_margin(tty) \
 	(tty->term->flags & TERM_DECSLRM)
@@ -397,7 +398,8 @@ tty_start_tty(struct tty *tty)
 		} else
 			tty_putcode(tty, TTYC_CLEAR);
 	}
-	tty->flags &= ~TTY_BIDI;
+	tty->flags &= ~(TTY_BIDI|TTY_BIDIBDSM|TTY_BIDIAUTO|TTY_BIDIRTL);
+	tty_bidi_free_rows(tty);
 	if (!options_get_number(global_options, "clear-on-attach") &&
 	    tty_has_bidi(tty)) {
 		/*
@@ -565,7 +567,14 @@ tty_stop_tty(struct tty *tty)
 
 	if (tty_use_margin(tty))
 		tty_raw(tty, tty_term_string(tty->term, TTYC_DSMG));
-	tty->flags &= ~TTY_BIDI;
+	if (tty->flags & TTY_BIDIAUTO)
+		tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDA));
+	if (tty->flags & TTY_BIDIRTL)
+		tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDR));
+	if (tty->flags & TTY_BIDIBDSM)
+		tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDI));
+	tty->flags &= ~(TTY_BIDI|TTY_BIDIBDSM|TTY_BIDIAUTO|TTY_BIDIRTL);
+	tty_bidi_free_rows(tty);
 	if (options_get_number(global_options, "clear-on-attach"))
 		tty_raw(tty, tty_term_string(tty->term, TTYC_RMCUP));
 	else
@@ -607,6 +616,7 @@ tty_free(struct tty *tty)
 #ifdef ENABLE_IMAGES
 	image_tty_free(tty, 0);
 #endif
+	tty_bidi_free_rows(tty);
 }
 
 void
@@ -676,15 +686,158 @@ tty_segment_bidi(struct window_pane *wp)
 	    TTY_STYLE_BIDI_BALANCE);
 }
 
-/* Note whether a visible pane uses bidi; no bytes are sent. */
-void
-tty_set_bidi(struct tty *tty, int on)
+/*
+ * Does a bidi pane own its rows on this terminal, so they use the outer bidi
+ * mode? It must fill the terminal width alone: this is tty_full_width on the
+ * pane's context, with the x offset screen_write_set_client_cb gives it, and
+ * no floating pane may overlap it.
+ */
+int
+tty_bidi_owner(struct tty *tty, struct window_pane *wp)
 {
+	struct client		*c = tty->client;
+	struct window_pane	*fwp;
+	int			 xoff = wp->xoff;
+
+	if (!tty_has_bidi(tty))
+		return (0);
+	if (!window_pane_is_visible(wp) || wp->layout_cell == NULL)
+		return (0);
+	if ((~wp->base.mode & MODE_BIDI) || window_pane_is_floating(wp))
+		return (0);
+	TAILQ_FOREACH(fwp, &wp->window->panes, entry) {
+		if (fwp != wp &&
+		    window_pane_is_visible(fwp) &&
+		    window_pane_floating_overlaps(fwp, wp))
+			return (0);
+	}
+	if (status_side_at_column(c) == 0)
+		xoff += status_side_size(c);
+	return (xoff == 0 && wp->sx >= tty->sx);
+}
+
+/*
+ * Build the outer rows of window w on this terminal, indexed by terminal row,
+ * with the offsets screen_write_set_client_cb uses. The map is NULL if there
+ * are none.
+ */
+static void
+tty_bidi_rows(struct tty *tty, struct window *w, u_char **map, u_int *n)
+{
+	struct client		*c = tty->client;
+	struct window_pane	*wp;
+	u_int			 ox, oy, sx, sy, top = 0;
+	int			 y, y0, y1;
+
+	*map = NULL;
+	*n = tty->sy;
+
+	tty_window_offset(tty, &ox, &oy, &sx, &sy);
+	if (status_at_line(c) == 0)
+		top = status_line_size(c);
+	TAILQ_FOREACH(wp, &w->panes, entry) {
+		if (!tty_bidi_owner(tty, wp))
+			continue;
+		y0 = wp->yoff - (int)oy;
+		y1 = y0 + (int)wp->sy;
+		if (y0 < 0)
+			y0 = 0;
+		if (y1 > (int)sy)
+			y1 = sy;
+		y0 += top;
+		y1 += top;
+		if (y1 > (int)tty->sy)
+			y1 = tty->sy;
+		for (y = y0; y < y1; y++) {
+			if (*map == NULL)
+				*map = xcalloc(tty->sy, 1);
+			(*map)[y] = 1;
+		}
+	}
+}
+
+/* Do these outer rows differ from those stored for this terminal? */
+static int
+tty_bidi_rows_differ(struct tty *tty, const u_char *map, u_int n)
+{
+	if (map == NULL || tty->bidi_rows == NULL)
+		return (map != tty->bidi_rows);
+	if (n != tty->bidi_nrows)
+		return (1);
+	return (memcmp(map, tty->bidi_rows, n) != 0);
+}
+
+/* Have the outer rows of window w changed since they were stored? */
+int
+tty_bidi_rows_changed(struct tty *tty, struct window *w)
+{
+	u_char	*map;
+	u_int	 n;
+	int	 changed;
+
+	tty_bidi_rows(tty, w, &map, &n);
+	changed = tty_bidi_rows_differ(tty, map, n);
+	free(map);
+	return (changed);
+}
+
+/* Forget the stored outer rows. */
+static void
+tty_bidi_free_rows(struct tty *tty)
+{
+	free(tty->bidi_rows);
+	tty->bidi_rows = NULL;
+	tty->bidi_nrows = 0;
+}
+
+/* Is terminal row y an outer row? */
+int
+tty_bidi_outer_row(struct tty *tty, u_int y)
+{
+	return (y < tty->bidi_nrows && tty->bidi_rows[y]);
+}
+
+/*
+ * Note whether a visible pane of window w uses bidi and store its outer rows.
+ * If they change, the terminal leaves the outer bidi mode and is cleared, so it
+ * forgets the bidi state it stored for each row before the redraw.
+ */
+void
+tty_set_bidi(struct tty *tty, struct window *w)
+{
+	struct window_pane	*wp;
+	u_char			*map;
+	u_int			 n;
+	int			 on = 0;
+
 	if (!tty_has_bidi(tty))
 		return;
+
+	TAILQ_FOREACH(wp, &w->panes, entry) {
+		if (window_pane_is_visible(wp) && (wp->base.mode & MODE_BIDI)) {
+			on = 1;
+			break;
+		}
+	}
+
+	tty_bidi_rows(tty, w, &map, &n);
+	if (tty_bidi_rows_differ(tty, map, n)) {
+		tty_reset(tty);
+		if (tty->flags & TTY_BIDIBDSM)
+			tty_putcode(tty, TTYC_DSBIDI);
+		tty_putcode(tty, TTYC_DSBIDA);
+		tty_putcode(tty, TTYC_DSBIDR);
+		tty->flags &= ~(TTY_BIDIBDSM|TTY_BIDIAUTO|TTY_BIDIRTL);
+		tty_putcode(tty, TTYC_CLEAR);
+		tty->cx = tty->cy = UINT_MAX;
+		log_debug("%s: bidi outer rows changed", tty->client->name);
+	}
+	tty_bidi_free_rows(tty);
+	tty->bidi_rows = map;
+	tty->bidi_nrows = (map == NULL ? 0 : n);
+
 	if (!on && (~tty->flags & TTY_BIDI))
 		return;
-
 	if (on)
 		tty->flags |= TTY_BIDI;
 	else
@@ -698,11 +851,72 @@ tty_set_bidi_ctx(struct tty *tty, struct tty_ctx *ctx)
 {
 	struct window_pane	*wp = ctx->arg;
 
+	u_int			 y;
+
 	ctx->style_ctx.bidi = 0;
 	if ((~tty->flags & TTY_BIDI) || wp == NULL)
 		return;
 
+	/*
+	 * Use the stored outer rows, which the terminal was last cleared for,
+	 * not the panes now: the first visible row of the pane decides.
+	 */
+	if (wp->yoff < (int)ctx->woy)
+		y = ctx->yoff - wp->yoff;
+	else
+		y = ctx->yoff - ctx->woy;
+	if ((wp->base.mode & MODE_BIDI) &&
+	    tty_full_width(tty, ctx) &&
+	    tty_bidi_outer_row(tty, y)) {
+		ctx->style_ctx.bidi = tty_pane_bidi(wp)|TTY_STYLE_BIDI_OUTER;
+		return;
+	}
 	ctx->style_ctx.bidi = tty_segment_bidi(wp);
+}
+
+/*
+ * Put the outer bidi mode in the state of the row the next text goes to: on
+ * with the paragraph controls of the pane for an outer row, off elsewhere. The
+ * paragraph controls are left alone while it is off, the terminal keeps them.
+ */
+static void
+tty_bidi_mode(struct tty *tty, int bits)
+{
+	if (!tty_has_bidi(tty))
+		return;
+	if (~bits & TTY_STYLE_BIDI_OUTER) {
+		if (tty->flags & TTY_BIDIBDSM) {
+			tty_putcode(tty, TTYC_DSBIDI);
+			tty->flags &= ~TTY_BIDIBDSM;
+		}
+		return;
+	}
+	if (~tty->flags & TTY_BIDIBDSM) {
+		tty_putcode(tty, TTYC_ENBIDI);
+		tty->flags |= TTY_BIDIBDSM;
+	}
+	if (bits & TTY_STYLE_BIDI_ISOLATE)
+		bits = 0;
+
+	if (bits & TTY_STYLE_BIDI_AUTO) {
+		if (~tty->flags & TTY_BIDIAUTO) {
+			tty_putcode(tty, TTYC_ENBIDA);
+			tty->flags |= TTY_BIDIAUTO;
+		}
+	} else if (tty->flags & TTY_BIDIAUTO) {
+		tty_putcode(tty, TTYC_DSBIDA);
+		tty->flags &= ~TTY_BIDIAUTO;
+	}
+
+	if (bits & TTY_STYLE_BIDI_RTL) {
+		if (~tty->flags & TTY_BIDIRTL) {
+			tty_putcode(tty, TTYC_ENBIDR);
+			tty->flags |= TTY_BIDIRTL;
+		}
+	} else if (tty->flags & TTY_BIDIRTL) {
+		tty_putcode(tty, TTYC_DSBIDR);
+		tty->flags &= ~TTY_BIDIRTL;
+	}
 }
 
 /*
@@ -715,6 +929,7 @@ tty_bidi_isolate(struct tty *tty, int bits, u_int x, u_int y)
 {
 	const char	*s;
 
+	tty_bidi_mode(tty, bits);
 	if (bits & TTY_STYLE_BIDI_AUTO)
 		s = "\342\201\250"; /* FSI */
 	else if (bits & TTY_STYLE_BIDI_RTL)
@@ -821,10 +1036,11 @@ tty_bidi_balance(struct tty *tty, struct screen *s, u_int px, u_int py,
 
 /* Write PDIs. */
 static void
-tty_bidi_pdi(struct tty *tty, u_int n)
+tty_bidi_pdi(struct tty *tty, int bits, u_int n)
 {
 	u_int	i;
 
+	tty_bidi_mode(tty, bits);
 	for (i = 0; i < n; i++)
 		tty_putn(tty, "\342\201\251", 3, 0); /* PDI */
 }
@@ -863,7 +1079,8 @@ tty_bidi_close_last(struct tty *tty, struct screen *s, u_int px, u_int py,
  */
 static void
 tty_bidi_close_end(struct tty *tty, struct screen *s, u_int px, u_int py,
-    u_int nx, u_int y, u_int n, const struct tty_style_ctx *style_ctx)
+    u_int nx, u_int y, u_int n, int bits,
+    const struct tty_style_ctx *style_ctx)
 {
 	if (tty->term->flags & TERM_NOAM) {
 		log_debug("%s: region not closed", __func__);
@@ -875,7 +1092,7 @@ tty_bidi_close_end(struct tty *tty, struct screen *s, u_int px, u_int py,
 		log_debug("%s: region not closed", __func__);
 		return;
 	}
-	tty_bidi_pdi(tty, n);
+	tty_bidi_pdi(tty, bits, n);
 }
 
 /*
@@ -929,14 +1146,15 @@ tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
 		end++;
 
 	if (end != 0 && x == tty->sx)
-		tty_bidi_close_end(tty, s, px, py, nx, y, end, style_ctx);
+		tty_bidi_close_end(tty, s, px, py, nx, y, end, bits,
+		    style_ctx);
 	if (open != 0) {
 		tty_cursor(tty, x - nx + at, y);
-		tty_bidi_pdi(tty, open);
+		tty_bidi_pdi(tty, bits, open);
 	}
 	if (end != 0 && x < tty->sx) {
 		tty_cursor(tty, x, y);
-		tty_bidi_pdi(tty, end);
+		tty_bidi_pdi(tty, bits, end);
 	}
 }
 
@@ -3045,6 +3263,7 @@ tty_attributes(struct tty *tty, const struct grid_cell *gc,
 	if (style_ctx == NULL)
 		style_ctx = &tty_default_style_ctx;
 	palette = style_ctx->palette;
+	tty_bidi_mode(tty, style_ctx->bidi);
 
 	/* Copy cell and update default colours. */
 	memcpy(&gc2, gc, sizeof gc2);
