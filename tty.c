@@ -389,14 +389,14 @@ tty_start_tty(struct tty *tty)
 		} else
 			tty_putcode(tty, TTYC_CLEAR);
 	}
-	tty->flags &= ~(TTY_BIDI|TTY_BIDIAUTO|TTY_BIDIRTL);
+	tty->flags &= ~TTY_BIDI;
 	if (!options_get_number(global_options, "clear-on-attach") &&
 	    tty_has_bidi(tty)) {
 		/*
-		 * Without SMCUP the terminal keeps its bidi modes, so make the
-		 * first redraw set them.
+		 * Without SMCUP the terminal keeps the bidi mode a shell left
+		 * on, and isolate regions need it off. SMCUP clears it.
 		 */
-		tty->flags |= TTY_BIDI;
+		tty_puts(tty, "\033[8l");
 	}
 	tty_putcode(tty, TTYC_SMKX);
 
@@ -557,12 +557,7 @@ tty_stop_tty(struct tty *tty)
 
 	if (tty_use_margin(tty))
 		tty_raw(tty, tty_term_string(tty->term, TTYC_DSMG));
-	if (tty->flags & TTY_BIDI) {
-		tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDA));
-		tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDR));
-		tty_raw(tty, tty_term_string(tty->term, TTYC_DSBIDI));
-		tty->flags &= ~(TTY_BIDI|TTY_BIDIAUTO|TTY_BIDIRTL);
-	}
+	tty->flags &= ~TTY_BIDI;
 	if (options_get_number(global_options, "clear-on-attach"))
 		tty_raw(tty, tty_term_string(tty->term, TTYC_RMCUP));
 	else
@@ -641,7 +636,7 @@ tty_has_bidi(struct tty *tty)
 {
 	return (tty->term != NULL &&
 	    (tty->client->flags & CLIENT_UTF8) &&
-	    tty_term_has(tty->term, TTYC_ENBIDI));
+	    tty_term_flag(tty->term, TTYC_BIDIREG));
 }
 
 /* Get the bidi style flags for a pane. */
@@ -659,10 +654,7 @@ tty_pane_bidi(struct window_pane *wp)
 	return (0);
 }
 
-/*
- * Turn bidi on or off. The clear makes the terminal forget the bidi state it
- * stored for each line.
- */
+/* Note whether a visible pane uses bidi; no bytes are sent. */
 void
 tty_set_bidi(struct tty *tty, int on)
 {
@@ -671,21 +663,10 @@ tty_set_bidi(struct tty *tty, int on)
 	if (!on && (~tty->flags & TTY_BIDI))
 		return;
 
-	tty_reset(tty);
-	if (on)
-		tty_putcode(tty, TTYC_ENBIDI);
-	else
-		tty_putcode(tty, TTYC_DSBIDI);
-	tty_putcode(tty, TTYC_DSBIDA);
-	tty_putcode(tty, TTYC_DSBIDR);
 	if (on)
 		tty->flags |= TTY_BIDI;
 	else
 		tty->flags &= ~TTY_BIDI;
-	tty->flags &= ~(TTY_BIDIAUTO|TTY_BIDIRTL);
-
-	tty_putcode(tty, TTYC_CLEAR);
-	tty->cx = tty->cy = UINT_MAX;
 	log_debug("%s: bidi %s", tty->client->name, on ? "on" : "off");
 }
 
@@ -907,36 +888,6 @@ tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
 	}
 	tty_cursor(tty, x, y);
 	tty_putn(tty, "\342\201\251", 3, 0); /* PDI */
-}
-
-/* Set the outer paragraph controls if bidi is on. */
-static void
-tty_bidi_paragraph(struct tty *tty, int bits)
-{
-	if (~tty->flags & TTY_BIDI)
-		return;
-	if (bits & TTY_STYLE_BIDI_ISOLATE)
-		bits = 0;
-
-	if (bits & TTY_STYLE_BIDI_AUTO) {
-		if (~tty->flags & TTY_BIDIAUTO) {
-			tty_putcode(tty, TTYC_ENBIDA);
-			tty->flags |= TTY_BIDIAUTO;
-		}
-	} else if (tty->flags & TTY_BIDIAUTO) {
-		tty_putcode(tty, TTYC_DSBIDA);
-		tty->flags &= ~TTY_BIDIAUTO;
-	}
-
-	if (bits & TTY_STYLE_BIDI_RTL) {
-		if (~tty->flags & TTY_BIDIRTL) {
-			tty_putcode(tty, TTYC_ENBIDR);
-			tty->flags |= TTY_BIDIRTL;
-		}
-	} else if (tty->flags & TTY_BIDIRTL) {
-		tty_putcode(tty, TTYC_DSBIDR);
-		tty->flags &= ~TTY_BIDIRTL;
-	}
 }
 
 void
@@ -2921,7 +2872,6 @@ tty_attributes(struct tty *tty, const struct grid_cell *gc,
 	if (style_ctx == NULL)
 		style_ctx = &tty_default_style_ctx;
 	palette = style_ctx->palette;
-	tty_bidi_paragraph(tty, style_ctx->bidi);
 
 	/* Copy cell and update default colours. */
 	memcpy(&gc2, gc, sizeof gc2);
