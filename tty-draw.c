@@ -18,6 +18,7 @@
 
 #include <sys/types.h>
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "tmux.h"
@@ -114,14 +115,63 @@ tty_draw_line_get_empty(const struct grid_cell *gc,
 	return (empty);
 }
 
+/* Isolate controls of a segment being balanced. */
+struct tty_draw_line_bidi {
+	u_int	 depth;		/* initiators open */
+	u_int	 seen;		/* initiators so far */
+	u_int	*drop;		/* numbers of the initiators to drop */
+	u_int	 ndrop;
+	u_int	 next;
+};
+
+/*
+ * Find the initiators in cells px to px + nx - 1 of line py, drawn from
+ * terminal column atx, that no PDI in those cells closes. They are numbered in
+ * order from 0, counting every initiator tty_draw_line_balance sees.
+ */
+static void
+tty_draw_line_unmatched(struct screen *s, u_int px, u_int py, u_int nx,
+    u_int atx, int bits, struct tty_draw_line_bidi *b)
+{
+	struct grid_cell	 gc;
+	const u_char		*cp;
+	u_int			 i, j, size = 0;
+
+	for (i = 0; i < nx; i++) {
+		grid_view_get_cell(s->grid, px + i, py, &gc);
+		if (gc.attr & GRID_ATTR_CHARSET)
+			continue;
+		if (!tty_bidi_keep_lead(bits, &gc, atx + i))
+			tty_bidi_unlead(&gc);
+		cp = gc.data.data;
+		for (j = 0; j + 2 < gc.data.size; j++) {
+			if (cp[j] != 0xe2 || cp[j + 1] != 0x81)
+				continue;
+			if (cp[j + 2] >= 0xa6 && cp[j + 2] <= 0xa8) {
+				if (b->ndrop == size) {
+					size += 8;
+					b->drop = xreallocarray(b->drop, size,
+					    sizeof *b->drop);
+				}
+				b->drop[b->ndrop++] = b->seen++;
+			} else if (cp[j + 2] == 0xa9 && b->ndrop != 0)
+				b->ndrop--;
+		}
+	}
+	b->seen = 0;
+}
+
 /*
  * Copy cell data, dropping a PDI with no initiator open in the segment so it
- * cannot close an isolate around it. depth counts the open initiators.
+ * cannot close an isolate around it, and the initiators the segment never
+ * closes.
  */
 static size_t
-tty_draw_line_balance(char *buf, const struct utf8_data *ud, u_int *depth)
+tty_draw_line_balance(char *buf, const struct utf8_data *ud,
+    struct tty_draw_line_bidi *b)
 {
 	size_t	i, len = 0;
+	u_int	n;
 
 	for (i = 0; i < ud->size; i++) {
 		if (i + 2 < ud->size &&
@@ -129,13 +179,21 @@ tty_draw_line_balance(char *buf, const struct utf8_data *ud, u_int *depth)
 		    ud->data[i + 1] == 0x81 &&
 		    ud->data[i + 2] >= 0xa6 &&
 		    ud->data[i + 2] <= 0xa9) {
-			if (ud->data[i + 2] != 0xa9)
-				(*depth)++;
-			else if (*depth != 0)
-				(*depth)--;
-			else {
-				i += 2;
-				continue;
+			if (ud->data[i + 2] == 0xa9) {
+				if (b->depth == 0) {
+					i += 2;
+					continue;
+				}
+				b->depth--;
+			} else {
+				n = b->seen++;
+				if (b->next != b->ndrop &&
+				    b->drop[b->next] == n) {
+					b->next++;
+					i += 2;
+					continue;
+				}
+				b->depth++;
 			}
 		}
 		buf[len++] = ud->data[i];
@@ -153,8 +211,9 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	struct grid_cell	 gc, ngc, last;
 	struct grid_line	*gl;
 	u_int			 i, j, last_i, cx, ex, width;
-	u_int			 cellsize, bg, depth = 0, blank, controls, open;
+	u_int			 cellsize, bg, blank, controls, open;
 	int			 flags, empty, wrapped = 0, bits, lead = 0;
+	struct tty_draw_line_bidi bidi = { 0 };
 	char			 buf[1000];
 	size_t			 len;
 	enum tty_draw_line_state current_state, next_state;
@@ -200,6 +259,13 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	log_debug("%s: drawing %u-%u,%u (end %u) at %u,%u; defaults: fg=%d, "
 	    "bg=%d", __func__, px, px + nx, py, ex, atx, aty, defaults->fg,
 	    defaults->bg);
+
+	/*
+	 * A segment tmux does not wrap in an isolate is laid out alone, where
+	 * an initiator left open makes no isolate, so drop those.
+	 */
+	if ((bits & TTY_STYLE_BIDI_BALANCE) && (~bits & TTY_STYLE_BIDI_ISOLATE))
+		tty_draw_line_unmatched(s, px, py, nx, atx, bits, &bidi);
 
 	/* Turn off cursor while redrawing and reset region and margins. */
 	flags = (tty->flags & TTY_NOCURSOR);
@@ -425,7 +491,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 			if ((bits & TTY_STYLE_BIDI_BALANCE) &&
 			    (~gcp->attr & GRID_ATTR_CHARSET)) {
 				len += tty_draw_line_balance(buf + len,
-				    &gcp->data, &depth);
+				    &gcp->data, &bidi);
 			} else {
 				memcpy(buf + len, gcp->data.data,
 				    gcp->data.size);
@@ -448,6 +514,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	}
 
 out:
+	free(bidi.drop);
 	tty->flags = (tty->flags & ~TTY_NOCURSOR)|flags;
 	tty_update_mode(tty, tty->mode, s);
 }
