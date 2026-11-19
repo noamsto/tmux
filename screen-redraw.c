@@ -1438,7 +1438,6 @@ redraw_bidi_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 	struct grid_cell	 defaults;
 	struct tty_style_ctx	 style_ctx = { 0 };
 	u_int			 x0, x1, px = 0, py = 0, n = span->width;
-	u_int			 cx = UINT_MAX, cy = UINT_MAX;
 	int			 bits, next_bits;
 
 	x0 = dctx->side_left + span->x;
@@ -1463,17 +1462,13 @@ redraw_bidi_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 			s = wp->screen;
 			px = span->data.p.px;
 			py = span->data.p.py;
-			if (s == &wp->base) {
-				cx = s->cx;
-				cy = s->cy;
-			}
 			tty_default_colours(&defaults, wp, &style_ctx.dim);
 			style_ctx.defaults = &defaults;
 			style_ctx.palette = &wp->palette;
 		}
 		style_ctx.hyperlinks = s->hyperlinks;
 		style_ctx.bidi = bits;
-		tty_bidi_close(tty, s, px, py, n, x0 + n, y, cx, cy, bits,
+		tty_bidi_close(tty, s, px, py, n, x0 + n, y, bits, 0,
 		    &style_ctx);
 	}
 	if (x1 >= tty->sx || (line = redraw_get_line(dctx, y)) == NULL)

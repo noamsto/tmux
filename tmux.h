@@ -2031,13 +2031,6 @@ struct tty_ctx {
 	u_int			 ocx;
 	u_int			 ocy;
 
-	/*
-	 * The pane cursor; ocx and ocy are not it while collected runs are
-	 * flushed.
-	 */
-	u_int			 cursor_x;
-	u_int			 cursor_y;
-
 	/* The collected line flush this is part of, or 0. */
 	u_int			 flush;
 
@@ -3148,7 +3141,7 @@ void	tty_bidi_unlead(struct grid_cell *);
 void	tty_bidi_balance(struct tty *, struct screen *, u_int, u_int, u_int,
 	    int, struct tty_bidi_scan *);
 void	tty_bidi_close(struct tty *, struct screen *, u_int, u_int, u_int,
-	    u_int, u_int, u_int, u_int, int, const struct tty_style_ctx *);
+	    u_int, u_int, int, int, const struct tty_style_ctx *);
 void	tty_set_selection(struct tty *, const char *, const char *, size_t);
 void	tty_write(void (*)(struct tty *, const struct tty_ctx *),
 	    struct tty_ctx *);
