@@ -1862,6 +1862,15 @@ struct tty_style_ctx {
 #define TTY_STYLE_BIDI_OUTER 0x10
 };
 
+/* Isolate controls and non-blank cells of part of a line, as drawn. */
+struct tty_bidi_scan {
+	u_int	controls;	/* isolate controls written */
+	u_int	open;		/* initiators no PDI closes */
+	u_int	first;		/* first non-blank cell, or the width */
+	u_int	last;		/* cell after the last non-blank one, or 0 */
+	u_int	lastctl;	/* after the last control's character, or 0 */
+};
+
 /* Maximum reported terminal size. */
 #define CLIENT_MAX_TERM_SIZE 10000
 
@@ -3069,8 +3078,8 @@ struct environ *environ_for_session(struct session *, int);
 /* tty-draw.c */
 void	tty_draw_line(struct tty *, struct screen *, u_int, u_int, u_int,
 	    u_int, u_int, const struct tty_style_ctx *);
-void	tty_draw_line_controls(struct tty *, struct screen *, u_int, u_int,
-	    u_int, u_int, int, u_int *, u_int *);
+void	tty_draw_line_bidi_scan(struct tty *, struct screen *, u_int, u_int,
+	    u_int, u_int, int, struct tty_bidi_scan *);
 
 /* tty.c */
 void	tty_create_log(void);
@@ -3137,7 +3146,7 @@ int	tty_bidi_agree(const struct grid_cell *);
 int	tty_bidi_keep_lead(int, const struct grid_cell *, u_int);
 void	tty_bidi_unlead(struct grid_cell *);
 void	tty_bidi_balance(struct tty *, struct screen *, u_int, u_int, u_int,
-	    int, u_int *, u_int *, u_int *);
+	    int, struct tty_bidi_scan *);
 void	tty_bidi_close(struct tty *, struct screen *, u_int, u_int, u_int,
 	    u_int, u_int, u_int, u_int, int, const struct tty_style_ctx *);
 void	tty_set_selection(struct tty *, const char *, const char *, size_t);

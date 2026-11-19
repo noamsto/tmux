@@ -147,30 +147,56 @@ tty_draw_line_get_cell(__unused struct tty *tty, struct screen *s, u_int px,
  * wide character cut off at the end, and no isolate control of a line drawing
  * cell. The other cells it skips as empty (spaces, tabs and cleared cells)
  * never hold controls. Count the controls written and the initiators no PDI
- * closes; if b is not NULL, also number those initiators in order from 0,
- * counting every initiator tty_draw_line_balance sees.
+ * closes, and find the cell after the last control and the non-blank cells:
+ * padding, or a cell holding anything but a space (a control included),
+ * whatever its background. If b is not NULL, also number those initiators in
+ * order from 0, counting every initiator tty_draw_line_balance sees.
  */
 static void
-tty_draw_line_scan(struct tty *tty, struct screen *s, u_int px, u_int py,
-    u_int nx, u_int atx, int bits, u_int *controls, u_int *open,
+tty_draw_line_scan(__unused struct tty *tty, struct screen *s, u_int px,
+    u_int py, u_int nx, u_int atx, int bits, struct tty_bidi_scan *sc,
     struct tty_draw_line_bidi *b)
 {
 	struct grid_cell	 gc, ngc;
 	const struct grid_cell	*gcp;
 	const u_char		*cp;
-	u_int			 i, j, step, seen = 0, size = 0;
+	u_int			 i, j, next = 0, seen = 0, size = 0;
 
-	*controls = 0;
-	*open = 0;
-	for (i = 0; i < nx; i += step) {
-		gcp = tty_draw_line_get_cell(tty, s, px + i, py, atx + i, bits,
-		    &gc);
-		step = 1;
+	sc->controls = 0;
+	sc->open = 0;
+	sc->first = nx;
+	sc->last = 0;
+	sc->lastctl = 0;
+	for (i = 0; i < nx; i++) {
+		grid_view_get_cell(s->grid, px + i, py, &gc);
+		if (tty_bidi_lead_size(&gc) != 0 &&
+		    !tty_bidi_keep_lead(bits, &gc, atx + i))
+			tty_bidi_unlead(&gc);
+		if ((gc.flags & GRID_FLAG_PADDING) ||
+		    gc.data.size != 1 ||
+		    gc.data.data[0] != ' ') {
+			if (sc->first == nx)
+				sc->first = i;
+			sc->last = i + 1;
+		}
+
+		/* The rest of a wide character, or one cut off. */
+		if (i < next)
+			continue;
+#ifdef ENABLE_IMAGES
+		gcp = image_map_cell(tty, s->grid, px + i, s->grid->hsize + py,
+		    &gc, &gc, NULL);
+#else
+		gcp = &gc;
+#endif
+		next = i + 1;
 		if ((gcp->flags & GRID_FLAG_PADDING) || gcp->data.width == 0)
 			continue;
-		if (gcp->data.width > nx - i)
-			break;
-		step = gcp->data.width;
+		if (gcp->data.width > nx - i) {
+			next = nx;
+			continue;
+		}
+		next = i + gcp->data.width;
 		if ((gcp->flags & GRID_FLAG_SELECTED) &&
 		    screen_select_cell(s, &ngc, gcp))
 			gcp = &ngc;
@@ -181,8 +207,9 @@ tty_draw_line_scan(struct tty *tty, struct screen *s, u_int px, u_int py,
 			if (cp[j] != 0xe2 || cp[j + 1] != 0x81)
 				continue;
 			if (cp[j + 2] >= 0xa6 && cp[j + 2] <= 0xa8) {
-				(*controls)++;
-				(*open)++;
+				sc->controls++;
+				sc->lastctl = next;
+				sc->open++;
 				if (b == NULL)
 					continue;
 				if (b->ndrop == size) {
@@ -192,10 +219,11 @@ tty_draw_line_scan(struct tty *tty, struct screen *s, u_int px, u_int py,
 				}
 				b->drop[b->ndrop++] = seen++;
 			} else if (cp[j + 2] == 0xa9) {
-				(*controls)++;
-				if (*open == 0)
+				sc->controls++;
+				sc->lastctl = next;
+				if (sc->open == 0)
 					continue;
-				(*open)--;
+				sc->open--;
 				if (b != NULL)
 					b->ndrop--;
 			}
@@ -204,15 +232,14 @@ tty_draw_line_scan(struct tty *tty, struct screen *s, u_int px, u_int py,
 }
 
 /*
- * Count the isolate controls tty_draw_line writes for cells px to px + nx - 1
- * of line py, drawn from terminal column atx, and the initiators among them no
- * PDI closes.
+ * Scan the isolate controls tty_draw_line writes for cells px to px + nx - 1
+ * of line py, drawn from terminal column atx, and its non-blank cells.
  */
 void
-tty_draw_line_controls(struct tty *tty, struct screen *s, u_int px, u_int py,
-    u_int nx, u_int atx, int bits, u_int *controls, u_int *open)
+tty_draw_line_bidi_scan(struct tty *tty, struct screen *s, u_int px, u_int py,
+    u_int nx, u_int atx, int bits, struct tty_bidi_scan *sc)
 {
-	tty_draw_line_scan(tty, s, px, py, nx, atx, bits, controls, open, NULL);
+	tty_draw_line_scan(tty, s, px, py, nx, atx, bits, sc, NULL);
 }
 
 /*
@@ -271,10 +298,11 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	struct grid_cell	 gc, ngc, last;
 	struct grid_line	*gl;
 	u_int			 i, j, last_i, cx, ex, width;
-	u_int			 cellsize, bg, blank, controls, open;
+	u_int			 cellsize, bg;
 	int			 flags, empty, wrapped = 0, bits, lead = 0;
 	int			 after = 0;
 	struct tty_draw_line_bidi bidi = { 0 };
+	struct tty_bidi_scan	 sc;
 	char			 buf[1000];
 	size_t			 len;
 	enum tty_draw_line_state current_state, next_state;
@@ -327,8 +355,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	 */
 	if ((bits & TTY_STYLE_BIDI_BALANCE) &&
 	    (~bits & TTY_STYLE_BIDI_ISOLATE)) {
-		tty_draw_line_scan(tty, s, px, py, nx, atx, bits, &controls,
-		    &open, &bidi);
+		tty_draw_line_scan(tty, s, px, py, nx, atx, bits, &sc, &bidi);
 	}
 
 	/*
@@ -376,14 +403,13 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	 * isolate.
 	 */
 	if ((bits & TTY_STYLE_BIDI_ISOLATE) && atx == 0) {
-		tty_bidi_balance(tty, s, px, py, nx, 1, &blank, &controls,
-		    &open);
-		if (blank != 0 &&
+		tty_bidi_balance(tty, s, px, py, nx, 1, &sc);
+		if (sc.last != 0 &&
 		    (bits & TTY_STYLE_BIDI_OUTER) &&
 		    cx == 0 &&
 		    !tty_bidi_agree(&gc))
 			after = 1;
-		else if (blank != 0) {
+		else if (sc.last != 0) {
 			tty_bidi_isolate(tty, bits, 0, aty);
 			lead = 1;
 		}

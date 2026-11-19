@@ -1050,31 +1050,18 @@ tty_bidi_has_control(const struct utf8_data *ud)
 
 /*
  * Balance the isolate controls tty_draw_line writes for cells px to px + nx - 1
- * of line py, where a PDI with no initiator open is dropped. Return the number
- * of initiators left open, the number of controls written and the cell after
- * the last non-blank one: a cell holding anything but a space, including a
- * control, whatever its background. The first cell's leading controls count
- * only if lead is set, because the cell goes to terminal column 0.
+ * of line py, where a PDI with no initiator open is dropped: count the
+ * initiators left open and the controls written, and find the non-blank cells,
+ * which hold anything but a space (a control included) whatever their
+ * background. The first cell's leading controls count only if lead is set,
+ * because the cell goes to terminal column 0.
  */
 void
 tty_bidi_balance(struct tty *tty, struct screen *s, u_int px, u_int py,
-    u_int nx, int lead, u_int *last, u_int *controls, u_int *open)
+    u_int nx, int lead, struct tty_bidi_scan *sc)
 {
-	struct grid_cell	 gc;
-	u_int			 i;
-
-	*last = 0;
-	for (i = 0; i < nx; i++) {
-		grid_view_get_cell(s->grid, px + i, py, &gc);
-		if (i != 0 || !lead || (gc.attr & GRID_ATTR_CHARSET))
-			tty_bidi_unlead(&gc);
-		if ((gc.flags & GRID_FLAG_PADDING) ||
-		    gc.data.size != 1 ||
-		    gc.data.data[0] != ' ')
-			*last = i + 1;
-	}
-	tty_draw_line_controls(tty, s, px, py, nx, lead ? 0 : 1,
-	    TTY_STYLE_BIDI_BALANCE, controls, open);
+	tty_draw_line_bidi_scan(tty, s, px, py, nx, lead ? 0 : 1,
+	    TTY_STYLE_BIDI_BALANCE, sc);
 }
 
 /* Write PDIs. */
@@ -1154,7 +1141,8 @@ tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
     const struct tty_style_ctx *style_ctx)
 {
 	struct grid_cell	gc;
-	u_int			i, last = nx, at, controls, open = 0, end = 0;
+	struct tty_bidi_scan	sc;
+	u_int			i, last = nx, at, open = 0, end = 0;
 	int			lead = (x == nx);
 
 	if (~bits & TTY_STYLE_BIDI_ISOLATE)
@@ -1165,8 +1153,9 @@ tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
 			grid_view_get_cell(s->grid, px, py, &gc);
 			lead = tty_bidi_keep_lead(bits, &gc, 0);
 		}
-		tty_bidi_balance(tty, s, px, py, nx, lead, &last, &controls,
-		    &open);
+		tty_bidi_balance(tty, s, px, py, nx, lead, &sc);
+		last = sc.last;
+		open = sc.open;
 		if (x == nx && last == 0)
 			bits &= ~TTY_STYLE_BIDI_ISOLATE;
 	}
@@ -2116,8 +2105,8 @@ static int
 tty_bidi_redraw(struct tty *tty, const struct tty_ctx *ctx, u_int py,
     u_int px, u_int nx)
 {
-	struct screen	*s = ctx->s;
-	u_int		 i, x, rx, ry, last, controls, open;
+	struct tty_bidi_scan	 sc;
+	u_int			 i, x, rx, ry;
 
 	if ((ctx->style_ctx.bidi &
 	    (TTY_STYLE_BIDI_ISOLATE|TTY_STYLE_BIDI_BALANCE)) == 0)
@@ -2125,9 +2114,8 @@ tty_bidi_redraw(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return (0);
 
-	tty_bidi_balance(tty, s, i, py, rx, x == 0, &last, &controls,
-	    &open);
-	if (controls != 0)
+	tty_bidi_balance(tty, ctx->s, i, py, rx, x == 0, &sc);
+	if (sc.controls != 0)
 		return (1);
 	if ((~ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) || x != 0)
 		return (0);
@@ -2135,33 +2123,23 @@ tty_bidi_redraw(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 		return (1);
 	if (px >= i + rx)
 		return (0);
-	tty_bidi_balance(tty, s, i, py, px - i, 1, &last, &controls,
-	    &open);
-	if (last != 0)
-		return (0);
-	if (px + nx < i + rx) {
-		tty_bidi_balance(tty, s, px + nx, py, i + rx - px - nx, 0,
-		    &last, &controls, &open);
-		if (last != 0)
-			return (0);
-	}
-	return (1);
+	return (sc.first >= px - i && sc.last <= px + nx - i);
 }
 
 /* Does the visible part of pane line py hold isolate controls of its own? */
 static int
 tty_bidi_controls(struct tty *tty, const struct tty_ctx *ctx, u_int py)
 {
-	u_int	i, x, rx, ry, last, controls, open;
+	struct tty_bidi_scan	sc;
+	u_int			i, x, rx, ry;
 
 	if ((ctx->style_ctx.bidi &
 	    (TTY_STYLE_BIDI_ISOLATE|TTY_STYLE_BIDI_BALANCE)) == 0)
 		return (0);
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return (0);
-	tty_bidi_balance(tty, ctx->s, i, py, rx, x == 0, &last, &controls,
-	    &open);
-	return (controls != 0);
+	tty_bidi_balance(tty, ctx->s, i, py, rx, x == 0, &sc);
+	return (sc.controls != 0);
 }
 
 /*
