@@ -280,7 +280,6 @@ struct redraw_draw_ctx {
 #define REDRAW_DEFAULT_SET 0x2
 #define REDRAW_STATUS_TOP 0x4
 #define REDRAW_BIDI 0x8
-#define REDRAW_BALANCE 0x10
 };
 
 /* Make redraw flags into a string. */
@@ -1326,9 +1325,7 @@ redraw_set_bidi_flags(struct redraw_draw_ctx *dctx)
 	struct client	*c = dctx->scene->c;
 	struct tty	*tty = &c->tty;
 
-	dctx->flags &= ~(REDRAW_BIDI|REDRAW_BALANCE|REDRAW_ISOLATES);
-	if (tty_has_bidi(tty))
-		dctx->flags |= REDRAW_BALANCE;
+	dctx->flags &= ~(REDRAW_BIDI|REDRAW_ISOLATES);
 	if (tty->flags & TTY_BIDI)
 		dctx->flags |= REDRAW_BIDI;
 	else if (tty->term != NULL && (c->flags & CLIENT_UTF8) &&
@@ -1336,20 +1333,15 @@ redraw_set_bidi_flags(struct redraw_draw_ctx *dctx)
 		dctx->flags |= REDRAW_ISOLATES;
 }
 
-/*
- * Get the bidi style flags for a span. Spans are balanced even with no bidi
- * pane visible, so one cannot close or extend another's isolates.
- */
+/* Get the bidi style flags for a span. */
 static int
 redraw_bidi_get(struct redraw_draw_ctx *dctx, struct redraw_span *span)
 {
-	if (~dctx->flags & REDRAW_BALANCE)
+	if (~dctx->flags & REDRAW_BIDI)
 		return (0);
 
 	switch (span->data.type) {
 	case REDRAW_SPAN_PANE:
-		if (~dctx->flags & REDRAW_BIDI)
-			return (TTY_STYLE_BIDI_BALANCE);
 		return (tty_segment_bidi(span->data.p.wp));
 	case REDRAW_SPAN_MENU:
 	case REDRAW_SPAN_STATUS:
@@ -2319,7 +2311,7 @@ redraw_draw(struct client *c, struct window_pane *wp, int flags)
 				y = dctx.status_lines;
 			else
 				y = 0;
-			if (dctx.flags & REDRAW_BALANCE)
+			if (dctx.flags & REDRAW_BIDI)
 				bidi = TTY_STYLE_BIDI_BALANCE;
 			else
 				bidi = 0;

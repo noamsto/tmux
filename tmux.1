@@ -5265,8 +5265,8 @@ mode off.
 .Nm
 wraps the row segments of bidi panes in closed isolates.
 The isolates that each pane, pane status line, side status line and menu
-writes itself are balanced within its row segment, whether or not a bidi pane
-is visible: a PDI with no initiator open is dropped, and an initiator left
+writes itself are balanced within its row segment while a bidi pane is
+visible: a PDI with no initiator open is dropped, and an initiator left
 open is closed in a bidi pane and dropped elsewhere.
 This sets the
 .Em \&Bidireg

@@ -698,17 +698,10 @@ tty_set_bidi_ctx(struct tty *tty, struct tty_ctx *ctx)
 	struct window_pane	*wp = ctx->arg;
 
 	ctx->style_ctx.bidi = 0;
-	if (wp == NULL)
+	if ((~tty->flags & TTY_BIDI) || wp == NULL)
 		return;
 
-	/*
-	 * Panes are balanced even with no bidi pane visible: a plain pane's
-	 * open initiator would otherwise reach a PDI in the next pane.
-	 */
-	if (tty->flags & TTY_BIDI)
-		ctx->style_ctx.bidi = tty_segment_bidi(wp);
-	else if (tty_has_bidi(tty))
-		ctx->style_ctx.bidi = TTY_STYLE_BIDI_BALANCE;
+	ctx->style_ctx.bidi = tty_segment_bidi(wp);
 }
 
 /*
