@@ -267,11 +267,18 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	if ((bits & TTY_STYLE_BIDI_BALANCE) && (~bits & TTY_STYLE_BIDI_ISOLATE))
 		tty_draw_line_unmatched(s, px, py, nx, atx, bits, &bidi);
 
-	/* Turn off cursor while redrawing and reset region and margins. */
+	/*
+	 * Turn off cursor while redrawing and reset region and margins. With
+	 * bidi a known region is kept, so a pane that scrolls with it does not
+	 * set it again after every line: the cursor moves within it and the
+	 * line is not continued by autowrap from its bottom (see below), so
+	 * nothing drawn here scrolls it.
+	 */
 	flags = (tty->flags & TTY_NOCURSOR);
 	tty->flags |= TTY_NOCURSOR;
 	tty_update_mode(tty, tty->mode, s);
-	tty_region_off(tty);
+	if (bits == 0 || tty->rupper == UINT_MAX)
+		tty_region_off(tty);
 	tty_margin_off(tty);
 
 	/* Start with the default cell as the last cell. */
@@ -350,13 +357,15 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 
 	/*
 	 * Did the previous line wrap on to this one? Not for an isolate
-	 * initiator, which must be stored with this row.
+	 * initiator, which must be stored with this row, nor from the bottom
+	 * of the scroll region, where wrapping would scroll it.
 	 */
 	if (py != 0 &&
 	    !lead &&
 	    atx == 0 &&
 	    tty->cx >= tty->sx &&
 	    tty->cy != UINT_MAX &&
+	    tty->cy != tty->rlower &&
 	    tty->cy + 1 == aty &&
 	    nx == tty->sx) {
 		gl = grid_get_line(gd, gd->hsize + py - 1);

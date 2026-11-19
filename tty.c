@@ -80,6 +80,8 @@ static void	tty_bidi_cleared(struct tty *, const struct tty_ctx *, u_int,
 #define tty_bidi_shared(tty, ctx) \
 	(((ctx)->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) && \
 	!tty_full_width(tty, ctx))
+#define tty_bidi_drawn(tty, ctx) \
+	((ctx)->flush != 0 && (ctx)->flush == (tty)->bidi_flush)
 
 #define TTY_BLOCK_INTERVAL (100000 /* 100 milliseconds */)
 #define TTY_BLOCK_START(tty) (1 + ((tty)->sx * (tty)->sy) * 8)
@@ -1929,13 +1931,27 @@ tty_bidi_cleared(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 		tty_bidi_line(tty, ctx, py, px, nx);
 }
 
+/*
+ * Redraw a pane line for a collected run of cells. The line now shows the
+ * screen as it is at the end of the flush, so the rest of the flush's runs for
+ * this line are already drawn.
+ */
+static void
+tty_bidi_draw_line(struct tty *tty, const struct tty_ctx *ctx)
+{
+	tty_draw_pane(tty, ctx, ctx->ocy);
+	tty->bidi_flush = ctx->flush;
+}
+
 void
 tty_cmd_redrawline(struct tty *tty, const struct tty_ctx *ctx)
 {
 	u_int			 i, x, rx, ry;
 
+	if (tty_bidi_drawn(tty, ctx))
+		return;
 	if (tty_bidi_redraw(tty, ctx, ctx->ocy, ctx->ocx, ctx->n)) {
-		tty_draw_pane(tty, ctx, ctx->ocy);
+		tty_bidi_draw_line(tty, ctx);
 		return;
 	}
 	if (tty_clamp_line(tty, ctx, ctx->ocx, ctx->ocy, ctx->n,
@@ -2049,6 +2065,8 @@ tty_write(void (*cmdfn)(struct tty *, const struct tty_ctx *),
 				break;
 			if (state == 0)
 				continue;
+			if (ctx->flush != c->tty.bidi_flush)
+				c->tty.bidi_flush = 0;
 			if ((ctx->flags & TTY_CTX_BIDI_REDRAW) &&
 			    cmdfn != tty_cmd_rawstring &&
 			    cmdfn != tty_cmd_setselection &&
@@ -2143,6 +2161,9 @@ tty_cmd_deletecharacter(struct tty *tty, const struct tty_ctx *ctx)
 void
 tty_cmd_clearcharacter(struct tty *tty, const struct tty_ctx *ctx)
 {
+	if (tty_bidi_drawn(tty, ctx))
+		return;
+
 	tty_default_attributes(tty, ctx->bg, &ctx->style_ctx);
 
 	tty_clear_pane_line(tty, ctx, ctx->ocy, ctx->ocx, ctx->n, ctx->bg);
@@ -2533,7 +2554,8 @@ tty_cmd_cells(struct tty *tty, const struct tty_ctx *ctx)
 	const char		*cp = ctx->data.data;
 	size_t			 n = ctx->data.size;
 
-	if (!tty_is_visible(tty, ctx, ctx->ocx, ctx->ocy, n, 1))
+	if (!tty_is_visible(tty, ctx, ctx->ocx, ctx->ocy, n, 1) ||
+	    tty_bidi_drawn(tty, ctx))
 		return;
 
 	if ((ctx->flags & TTY_CTX_WINDOW_BIGGER) &&
@@ -2553,7 +2575,7 @@ tty_cmd_cells(struct tty *tty, const struct tty_ctx *ctx)
 	}
 
 	if (tty_bidi_redraw(tty, ctx, ctx->ocy, ctx->ocx, n)) {
-		tty_draw_pane(tty, ctx, ctx->ocy);
+		tty_bidi_draw_line(tty, ctx);
 		return;
 	}
 

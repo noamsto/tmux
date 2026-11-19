@@ -2688,9 +2688,12 @@ screen_write_collect_flush_line(struct screen_write_ctx *ctx, u_int y,
 	struct tty_ctx			 ttyctx;
 	struct visible_ranges		*r;
 	struct visible_range		*ri;
+	static u_int			 flush;
 
 	if (TAILQ_EMPTY(&cl->items))
 		return (0);
+	if (++flush == 0)
+		flush = 1;
 
 	if (wp != NULL) {
 		wsx = wp->window->sx;
@@ -2746,6 +2749,7 @@ screen_write_collect_flush_line(struct screen_write_ctx *ctx, u_int y,
 				screen_write_initctx(ctx, &ttyctx, 1, 0);
 				screen_write_set_ttyctx_cursor(ctx, &ttyctx, cx,
 				    cy);
+				ttyctx.flush = flush;
 				ttyctx.bg = ci->bg;
 				ttyctx.n = w_length;
 				tty_write(tty_cmd_clearcharacter, &ttyctx);
@@ -2753,6 +2757,7 @@ screen_write_collect_flush_line(struct screen_write_ctx *ctx, u_int y,
 				screen_write_initctx(ctx, &ttyctx, 0, 1);
 				screen_write_set_ttyctx_cursor(ctx, &ttyctx, cx,
 				    cy);
+				ttyctx.flush = flush;
 				if (ttyctx.flags & TTY_CTX_PANE_OBSCURED) {
 					ttyctx.n = w_length;
 					tty_write(tty_cmd_redrawline, &ttyctx);

@@ -1894,6 +1894,8 @@ struct tty {
 	u_int		 rleft;
 	u_int		 rright;
 
+	u_int		 bidi_flush;
+
 	struct event	 event_in;
 	struct evbuffer	*in;
 	struct event	 event_out;
@@ -2014,6 +2016,9 @@ struct tty_ctx {
 	 */
 	u_int			 cursor_x;
 	u_int			 cursor_y;
+
+	/* The collected line flush this is part of, or 0. */
+	u_int			 flush;
 
 	u_int			 orupper;
 	u_int			 orlower;
