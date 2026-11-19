@@ -5260,10 +5260,19 @@ Supports application escape key mode, where the Escape key sends a sequence
 that cannot be mistaken for the start of another key.
 .It bidi
 Supports per-pane bidirectional text.
-The terminal lays out Unicode isolate regions on rows written with its bidi
-mode off.
+The terminal needs both the
+.Em \&Bidireg
+and
+.Em \&Enbidi
+capabilities.
 .Nm
-wraps the row segments of bidi panes in closed isolates.
+writes the rows of a bidi pane that fills the terminal width alone, with no
+other pane on its rows, with the terminal's outer bidi mode on (BDSM).
+It writes every other row with bidi mode off, where the terminal lays out
+Unicode isolate regions, and wraps the row segments of bidi panes in closed
+isolates.
+.Nm
+clears the terminal when the set of rows written with outer bidi mode changes.
 The isolates that each pane, pane status line, side status line and menu
 writes itself are balanced within its row segment while a bidi pane is
 visible: a PDI with no initiator open is dropped, and an initiator left
@@ -9129,6 +9138,8 @@ A flag that tells
 .Nm
 the terminal lays out Unicode isolate regions on rows written with its bidi
 mode off.
+Bidi handling also needs
+.Em \&Enbidi .
 It is set by the
 .Ic bidi
 feature.
@@ -9152,6 +9163,12 @@ Set, clear, disable or enable DECSLRM margins.
 These are set automatically if the terminal reports it is
 .Em VT420
 compatible.
+.It Em \&Dsbida , \&Enbida
+Disable and enable automatic detection of the paragraph direction.
+.It Em \&Dsbidi , \&Enbidi
+Disable and enable the terminal's implicit bidirectional mode.
+.It Em \&Dsbidr , \&Enbidr
+Set the paragraph direction to left-to-right and right-to-left.
 .It Em \&Dsbp , \&Enbp
 Disable and enable bracketed paste.
 These are set automatically if the

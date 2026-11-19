@@ -638,13 +638,14 @@ tty_update_features(struct tty *tty)
 	}
 }
 
-/* Does this terminal want per-pane bidi? */
+/* Does this terminal want per-pane bidi? It needs Bidireg and Enbidi. */
 int
 tty_has_bidi(struct tty *tty)
 {
 	return (tty->term != NULL &&
 	    (tty->client->flags & CLIENT_UTF8) &&
-	    tty_term_flag(tty->term, TTYC_BIDIREG));
+	    tty_term_flag(tty->term, TTYC_BIDIREG) &&
+	    tty_term_has(tty->term, TTYC_ENBIDI));
 }
 
 /* Get the bidi style flags for a pane. */

@@ -522,6 +522,9 @@ enum tty_code_code {
 	TTYC_DIM,
 	TTYC_DL,
 	TTYC_DL1,
+	TTYC_DSBIDA,
+	TTYC_DSBIDI,
+	TTYC_DSBIDR,
 	TTYC_DSBP,
 	TTYC_DSEKS,
 	TTYC_DSESC,
@@ -533,6 +536,9 @@ enum tty_code_code {
 	TTYC_EL,
 	TTYC_EL1,
 	TTYC_ENACS,
+	TTYC_ENBIDA,
+	TTYC_ENBIDI,
+	TTYC_ENBIDR,
 	TTYC_ENBP,
 	TTYC_ENEKS,
 	TTYC_ENESC,
@@ -1853,6 +1859,7 @@ struct tty_style_ctx {
 #define TTY_STYLE_BIDI_RTL 0x2
 #define TTY_STYLE_BIDI_ISOLATE 0x4
 #define TTY_STYLE_BIDI_BALANCE 0x8
+#define TTY_STYLE_BIDI_OUTER 0x10
 };
 
 /* Maximum reported terminal size. */
@@ -1895,6 +1902,8 @@ struct tty {
 	u_int		 rright;
 
 	u_int		 bidi_flush;
+	u_char		*bidi_rows;
+	u_int		 bidi_nrows;
 
 	struct event	 event_in;
 	struct evbuffer	*in;
@@ -1931,6 +1940,9 @@ struct tty {
 #define TTY_WINSZPIXELS 0x40000
 #define TTY_WINSZAPPLY 0x80000
 #define TTY_BIDI 0x100000
+#define TTY_BIDIAUTO 0x200000
+#define TTY_BIDIRTL 0x400000
+#define TTY_BIDIBDSM 0x800000
 #define TTY_ALL_REQUEST_FLAGS \
 	(TTY_HAVEDA|TTY_HAVEDA2|TTY_HAVEXDA|TTY_HAVESYNC|TTY_HAVEKITTYGRAPHICS)
 	int		 flags;
