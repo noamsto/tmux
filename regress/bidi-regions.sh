@@ -97,18 +97,15 @@ expect_count() {
 }
 
 # S1: a bidi pane left of a plain one. The FSI leads the first cell, the PDI
-# closes the segment at the column of the border and nothing is added after the
-# border.
+# closes the segment at the column of the border and the plain segment right of
+# it holds no isolate.
 run S1 "${BIDI}שלום world" "abc אבג"
 expect S1 "\033[H${FSI}שלום world${SP30}${PDI}" \
     "the FSI before the shin and the PDI at column 40"
-after=$(LC_ALL=C sed -n "1s/.*$BORDER//p" "$SGRLESS")
-case $after in
-*"$(printf '%b' "$FSI")"* | *"$(printf '%b' "$PDI")"*)
-	echo "[FAIL] case S1: an isolate follows the border on row 1"
-	exit_status=1
-	;;
-esac
+expect S1 "${PDI}\033[Cabc אבג\033[K" \
+    "the plain segment after the PDI with no isolate of its own"
+expect_count S1 "$FSI" 1 "FSI (blank rows have none)"
+expect_count S1 "$PDI" 1 "PDI (blank rows have none)"
 
 # S2: a plain pane left of a bidi one. The FSI follows the border cell and the
 # PDI the last cell, in pending wrap, with the rest of the segment cleared. A

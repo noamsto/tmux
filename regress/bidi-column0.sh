@@ -2,8 +2,9 @@
 
 # Test that a pane in BDSM (SM 8) keeps a directional isolate control (U+2066
 # .. U+2069) printed at column 0, and drops it again when the text moves to
-# another row or the screen scrolls. The control is kept whatever the first
-# cell's width. Without BDSM the control is dropped as upstream does.
+# another row or the screen scrolls. The control is kept unless a VS16 widens
+# the cell it already leads. Without BDSM the control is dropped as upstream
+# does.
 
 PATH=/bin:/usr/bin
 TERM=screen

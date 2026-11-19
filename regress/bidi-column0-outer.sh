@@ -36,7 +36,7 @@ RIGHT='sleep 100'
 #   Show pane_output in the first pane of an inner session (split in two side
 #   by side panes if split is 1, the second showing $RIGHT), attach an inner
 #   client to it from an outer pane and save the bytes the inner client writes
-#   for the refresh, without SGR sequences, in $RAW.
+#   for the refresh in $RAW, and without SGR sequences in $TMP.
 inner() {
 	$TMUX kill-server 2>/dev/null
 	$TMUX2 kill-server 2>/dev/null

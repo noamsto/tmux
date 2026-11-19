@@ -698,10 +698,17 @@ tty_set_bidi_ctx(struct tty *tty, struct tty_ctx *ctx)
 	struct window_pane	*wp = ctx->arg;
 
 	ctx->style_ctx.bidi = 0;
-	if ((~tty->flags & TTY_BIDI) || wp == NULL)
+	if (wp == NULL)
 		return;
 
-	ctx->style_ctx.bidi = tty_segment_bidi(wp);
+	/*
+	 * Panes are balanced even with no bidi pane visible: a plain pane's
+	 * open initiator would otherwise reach a PDI in the next pane.
+	 */
+	if (tty->flags & TTY_BIDI)
+		ctx->style_ctx.bidi = tty_segment_bidi(wp);
+	else if (tty_has_bidi(tty))
+		ctx->style_ctx.bidi = TTY_STYLE_BIDI_BALANCE;
 }
 
 /*
@@ -744,8 +751,10 @@ tty_bidi_lead_size(const struct grid_cell *gc)
  * Should the isolate controls a pane printed at column 0 be written before
  * the cell at terminal column col? Only at column 0, where the terminal
  * stores them with this cell whatever its width: elsewhere it would store
- * them with the cell to the left. A line drawing cell is written through the
- * line drawing character set one byte at a time, so never carries them.
+ * them with the cell to the left. The terminal drops them when a variation
+ * selector later widens the cell, and so does screen_write_combine. A line
+ * drawing cell is written through the line drawing character set one byte at
+ * a time, so never carries them.
  */
 int
 tty_bidi_keep_lead(int bits, const struct grid_cell *gc, u_int col)
@@ -788,23 +797,21 @@ tty_bidi_has_control(const struct utf8_data *ud)
 }
 
 /*
- * Balance the isolate controls the text in cells px to px + nx - 1 of line py
- * holds, where a PDI with no initiator open is dropped. Return the number of
- * initiators left open, the number of controls seen and the cell after the
- * last non-blank one: a cell holding anything but a space, including a
+ * Balance the isolate controls tty_draw_line writes for cells px to px + nx - 1
+ * of line py, where a PDI with no initiator open is dropped. Return the number
+ * of initiators left open, the number of controls written and the cell after
+ * the last non-blank one: a cell holding anything but a space, including a
  * control, whatever its background. The first cell's leading controls count
  * only if lead is set, because the cell goes to terminal column 0.
  */
 void
-tty_bidi_balance(struct screen *s, u_int px, u_int py, u_int nx, int lead,
-    u_int *last, u_int *controls, u_int *open)
+tty_bidi_balance(struct tty *tty, struct screen *s, u_int px, u_int py,
+    u_int nx, int lead, u_int *last, u_int *controls, u_int *open)
 {
 	struct grid_cell	 gc;
-	const u_char		*cp;
-	u_int			 i, j, depth = 0;
+	u_int			 i;
 
 	*last = 0;
-	*controls = 0;
 	for (i = 0; i < nx; i++) {
 		grid_view_get_cell(s->grid, px + i, py, &gc);
 		if (i != 0 || !lead || (gc.attr & GRID_ATTR_CHARSET))
@@ -813,21 +820,9 @@ tty_bidi_balance(struct screen *s, u_int px, u_int py, u_int nx, int lead,
 		    gc.data.size != 1 ||
 		    gc.data.data[0] != ' ')
 			*last = i + 1;
-		cp = gc.data.data;
-		for (j = 0; j + 2 < gc.data.size; j++) {
-			if (cp[j] != 0xe2 || cp[j + 1] != 0x81)
-				continue;
-			if (cp[j + 2] >= 0xa6 && cp[j + 2] <= 0xa8) {
-				depth++;
-				(*controls)++;
-			} else if (cp[j + 2] == 0xa9) {
-				if (depth > 0)
-					depth--;
-				(*controls)++;
-			}
-		}
 	}
-	*open = depth;
+	tty_draw_line_controls(tty, s, px, py, nx, lead ? 0 : 1,
+	    TTY_STYLE_BIDI_BALANCE, controls, open);
 }
 
 /* Write PDIs. */
@@ -910,7 +905,7 @@ tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
 	if (~bits & TTY_STYLE_BIDI_ISOLATE)
 		return;
 	if (s != NULL) {
-		tty_bidi_balance(s, px, py, nx, x == nx, &last, &controls,
+		tty_bidi_balance(tty, s, px, py, nx, x == nx, &last, &controls,
 		    &open);
 		if (x == nx && last == 0)
 			bits &= ~TTY_STYLE_BIDI_ISOLATE;
@@ -1870,7 +1865,8 @@ tty_bidi_redraw(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return (0);
 
-	tty_bidi_balance(s, i, py, rx, x == 0, &last, &controls, &open);
+	tty_bidi_balance(tty, s, i, py, rx, x == 0, &last, &controls,
+	    &open);
 	if (controls != 0)
 		return (1);
 	if ((~ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) || x != 0)
@@ -1879,12 +1875,13 @@ tty_bidi_redraw(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 		return (1);
 	if (px >= i + rx)
 		return (0);
-	tty_bidi_balance(s, i, py, px - i, 1, &last, &controls, &open);
+	tty_bidi_balance(tty, s, i, py, px - i, 1, &last, &controls,
+	    &open);
 	if (last != 0)
 		return (0);
 	if (px + nx < i + rx) {
-		tty_bidi_balance(s, px + nx, py, i + rx - px - nx, 0, &last,
-		    &controls, &open);
+		tty_bidi_balance(tty, s, px + nx, py, i + rx - px - nx, 0,
+		    &last, &controls, &open);
 		if (last != 0)
 			return (0);
 	}
@@ -1901,7 +1898,8 @@ tty_bidi_controls(struct tty *tty, const struct tty_ctx *ctx, u_int py)
 		return (0);
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return (0);
-	tty_bidi_balance(ctx->s, i, py, rx, x == 0, &last, &controls, &open);
+	tty_bidi_balance(tty, ctx->s, i, py, rx, x == 0, &last, &controls,
+	    &open);
 	return (controls != 0);
 }
 
@@ -1922,7 +1920,8 @@ tty_bidi_cleared(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return;
 
-	tty_bidi_balance(ctx->s, i, py, rx, x == 0, &last, &controls, &open);
+	tty_bidi_balance(tty, ctx->s, i, py, rx, x == 0, &last, &controls,
+	    &open);
 	if (x == 0 && last == 0)
 		return;
 	if (x == 0 && px <= i)

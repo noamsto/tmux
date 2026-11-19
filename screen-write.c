@@ -3307,8 +3307,10 @@ screen_write_cell(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 	/*
 	 * Store the kept controls before the char so every redraw writes them
 	 * at column 0 ahead of it, where the terminal applies them whatever
-	 * the cell's width. On a row continuing a wrapped line the terminal
-	 * stores them with the row above, so then they are dropped.
+	 * the cell's width. A variation selector that widens the cell later
+	 * drops them, as in the terminal (screen_write_combine). On a row
+	 * continuing a wrapped line the terminal stores them with the row
+	 * above, so then they are dropped.
 	 */
 	if (!screen_write_lead_target(ctx) ||
 	    n + gc->data.size >= UTF8_SIZE) {
