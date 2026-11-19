@@ -1335,7 +1335,8 @@ redraw_set_bidi_flags(struct redraw_draw_ctx *dctx)
 
 /*
  * Get the bidi style flags for a span on terminal row y. On an outer row a
- * bidi pane takes the outer bidi mode and anything over it is isolated.
+ * bidi pane and its overlay scrollbar take the outer bidi mode and anything
+ * over it is isolated.
  */
 static int
 redraw_bidi_get(struct redraw_draw_ctx *dctx, struct redraw_span *span,
@@ -1360,6 +1361,12 @@ redraw_bidi_get(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 			    TTY_STYLE_BIDI_OUTER);
 		}
 		return (TTY_STYLE_BIDI_BALANCE);
+	case REDRAW_SPAN_SCROLLBAR:
+		if (tty_bidi_outer_row(tty, y)) {
+			wp = span->data.sb.wp;
+			return (tty_pane_bidi(wp)|TTY_STYLE_BIDI_OUTER);
+		}
+		return (0);
 	default:
 		return (0);
 	}
@@ -1696,6 +1703,7 @@ redraw_draw_scrollbar_span(struct redraw_draw_ctx *dctx,
 	struct tty		*tty = &scene->c->tty;
 	struct style		*sb_style = &wp->scrollbar_style;
 	struct grid_cell	 gc, slgc, pad_gc, *gcp;
+	struct tty_style_ctx	 style_ctx, *sc;
 	double			 pct_view;
 	u_int			 total_height, slider_h, slider_y;
 	u_int			 sb_h = span->data.sb.height;
@@ -1740,17 +1748,18 @@ redraw_draw_scrollbar_span(struct redraw_draw_ctx *dctx,
 	sb_w = sb_style->width;
 	sb_pad = sb_style->pad;
 	off = x - dctx->side_left - span->x;
+	sc = redraw_bidi_style(&style_ctx, s, redraw_bidi_get(dctx, span, y));
 
 	tty_cursor(tty, x, y);
 	for (i = 0; i < n; i++) {
 		if (span->data.sb.flags & REDRAW_SCROLLBAR_LEFT) {
 			if (off + i >= sb_w && off + i < sb_w + sb_pad) {
-				tty_cell(tty, &pad_gc, NULL);
+				tty_cell(tty, &pad_gc, sc);
 				continue;
 			}
 		} else {
 			if (off + i < sb_pad) {
-				tty_cell(tty, &pad_gc, NULL);
+				tty_cell(tty, &pad_gc, sc);
 				continue;
 			}
 		}
@@ -1759,7 +1768,7 @@ redraw_draw_scrollbar_span(struct redraw_draw_ctx *dctx,
 			gcp = &slgc;
 		else
 			gcp = &gc;
-		tty_cell(tty, gcp, NULL);
+		tty_cell(tty, gcp, sc);
 	}
 	return (1);
 }

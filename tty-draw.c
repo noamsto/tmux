@@ -273,6 +273,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	u_int			 i, j, last_i, cx, ex, width;
 	u_int			 cellsize, bg, blank, controls, open;
 	int			 flags, empty, wrapped = 0, bits, lead = 0;
+	int			 after = 0;
 	struct tty_draw_line_bidi bidi = { 0 };
 	char			 buf[1000];
 	size_t			 len;
@@ -332,15 +333,18 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 
 	/*
 	 * Turn off cursor while redrawing and reset region and margins. With
-	 * a bidi pane visible a known region is kept, so a pane that scrolls
-	 * with it does not set it again after every line: the cursor moves
-	 * within it and the line is not continued by autowrap from its bottom
-	 * (see below), so nothing drawn here scrolls it.
+	 * a bidi pane visible a known region is kept on a region row, so a
+	 * pane that scrolls with it does not set it again after every line:
+	 * the cursor moves within it and the line is not continued by autowrap
+	 * from its bottom (see below), so nothing drawn here scrolls it.
 	 */
 	flags = (tty->flags & TTY_NOCURSOR);
 	tty->flags |= TTY_NOCURSOR;
 	tty_update_mode(tty, tty->mode, s);
-	if (bits == 0 || (~tty->flags & TTY_BIDI) || tty->rupper == UINT_MAX)
+	if ((~bits & TTY_STYLE_BIDI_BALANCE) ||
+	    (bits & TTY_STYLE_BIDI_OUTER) ||
+	    (~tty->flags & TTY_BIDI) ||
+	    tty->rupper == UINT_MAX)
 		tty_region_off(tty);
 	tty_margin_off(tty);
 
@@ -366,12 +370,20 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 
 	/*
 	 * The terminal keeps a control written at column 0 for the next cell
-	 * written there, whatever its width. A blank segment gets no isolate.
+	 * written there, whatever its width, but with the outer bidi mode on
+	 * it drops it before a cell whose width it may see differently, so
+	 * then the control goes after that cell. A blank segment gets no
+	 * isolate.
 	 */
 	if ((bits & TTY_STYLE_BIDI_ISOLATE) && atx == 0) {
 		tty_bidi_balance(tty, s, px, py, nx, 1, &blank, &controls,
 		    &open);
-		if (blank != 0) {
+		if (blank != 0 &&
+		    (bits & TTY_STYLE_BIDI_OUTER) &&
+		    cx == 0 &&
+		    !tty_bidi_agree(&gc))
+			after = 1;
+		else if (blank != 0) {
 			tty_bidi_isolate(tty, bits, 0, aty);
 			lead = 1;
 		}
@@ -576,6 +588,9 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 		else
 			i += gcp->data.width;
 	}
+
+	if (after)
+		tty_bidi_isolate(tty, bits, 1, aty);
 
 out:
 	free(bidi.drop);

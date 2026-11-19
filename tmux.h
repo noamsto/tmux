@@ -3133,6 +3133,7 @@ void	tty_set_bidi(struct tty *, struct window *);
 void	tty_set_bidi_ctx(struct tty *, struct tty_ctx *);
 void	tty_bidi_isolate(struct tty *, int, u_int, u_int);
 u_int	tty_bidi_lead_size(const struct grid_cell *);
+int	tty_bidi_agree(const struct grid_cell *);
 int	tty_bidi_keep_lead(int, const struct grid_cell *, u_int);
 void	tty_bidi_unlead(struct grid_cell *);
 void	tty_bidi_balance(struct tty *, struct screen *, u_int, u_int, u_int,

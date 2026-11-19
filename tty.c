@@ -957,10 +957,45 @@ tty_bidi_lead_size(const struct grid_cell *gc)
 }
 
 /*
+ * Does the terminal keep a control written at column 0 before this cell with
+ * the outer bidi mode on? Only for a cell holding one character from a short
+ * list where tmux and the terminal agree it is one column wide: for a cell the
+ * terminal makes another width, it drops the control. A line drawing cell is
+ * never one: it is written through the line drawing character set one byte at
+ * a time.
+ */
+int
+tty_bidi_agree(const struct grid_cell *gc)
+{
+	const struct utf8_data	*ud = &gc->data;
+	const u_char		*cp;
+	u_int			 n, c;
+
+	if (ud->width != 1 || (gc->flags & (GRID_FLAG_PADDING|GRID_FLAG_TAB)))
+		return (0);
+	if (gc->attr & GRID_ATTR_CHARSET)
+		return (0);
+	n = tty_bidi_lead_size(gc);
+	cp = ud->data + n;
+	if (ud->size == n + 1)
+		c = cp[0];
+	else if (ud->size == n + 2 && (cp[0] & 0xe0) == 0xc0)
+		c = ((cp[0] & 0x1f) << 6)|(cp[1] & 0x3f);
+	else
+		return (0);
+	return ((c >= 0x20 && c <= 0x7e) ||
+	    (c >= 0xc0 && c <= 0x24f) ||
+	    (c >= 0x386 && c <= 0x4ff) ||
+	    (c >= 0x5d0 && c <= 0x5ea) ||
+	    (c >= 0x620 && c <= 0x64a));
+}
+
+/*
  * Should the isolate controls a pane printed at column 0 be written before
  * the cell at terminal column col? Only at column 0, where the terminal
- * stores them with this cell whatever its width: elsewhere it would store
- * them with the cell to the left. The terminal drops them when a variation
+ * stores them with this cell: elsewhere it would store them with the cell to
+ * the left. On an outer row only before a cell tty_bidi_agree accepts; on a
+ * region row whatever its width. The terminal drops them when a variation
  * selector later widens the cell, and so does screen_write_combine. A line
  * drawing cell is written through the line drawing character set one byte at
  * a time, so never carries them.
@@ -968,6 +1003,8 @@ tty_bidi_lead_size(const struct grid_cell *gc)
 int
 tty_bidi_keep_lead(int bits, const struct grid_cell *gc, u_int col)
 {
+	if (bits & TTY_STYLE_BIDI_OUTER)
+		return (col == 0 && tty_bidi_agree(gc));
 	if ((bits & (TTY_STYLE_BIDI_ISOLATE|TTY_STYLE_BIDI_BALANCE)) == 0)
 		return (0);
 	return (col == 0 && (~gc->attr & GRID_ATTR_CHARSET));
@@ -1112,11 +1149,17 @@ tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
 {
 	struct grid_cell	gc;
 	u_int			i, last = nx, at, controls, open = 0, end = 0;
+	int			lead = (x == nx);
 
 	if (~bits & TTY_STYLE_BIDI_ISOLATE)
 		return;
 	if (s != NULL) {
-		tty_bidi_balance(tty, s, px, py, nx, x == nx, &last, &controls,
+		/* The first cell's own controls count only if drawn. */
+		if (lead) {
+			grid_view_get_cell(s->grid, px, py, &gc);
+			lead = tty_bidi_keep_lead(bits, &gc, 0);
+		}
+		tty_bidi_balance(tty, s, px, py, nx, lead, &last, &controls,
 		    &open);
 		if (x == nx && last == 0)
 			bits &= ~TTY_STYLE_BIDI_ISOLATE;
@@ -2072,7 +2115,8 @@ tty_bidi_redraw(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 	struct screen	*s = ctx->s;
 	u_int		 i, x, rx, ry, last, controls, open;
 
-	if (ctx->style_ctx.bidi == 0)
+	if ((ctx->style_ctx.bidi &
+	    (TTY_STYLE_BIDI_ISOLATE|TTY_STYLE_BIDI_BALANCE)) == 0)
 		return (0);
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return (0);
@@ -2106,7 +2150,8 @@ tty_bidi_controls(struct tty *tty, const struct tty_ctx *ctx, u_int py)
 {
 	u_int	i, x, rx, ry, last, controls, open;
 
-	if (ctx->style_ctx.bidi == 0)
+	if ((ctx->style_ctx.bidi &
+	    (TTY_STYLE_BIDI_ISOLATE|TTY_STYLE_BIDI_BALANCE)) == 0)
 		return (0);
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return (0);
@@ -2719,12 +2764,13 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 		return;
 
 	/*
-	 * Draw the line from the grid if the cell holds isolate controls: a
-	 * combined cell too long for the grid may hold controls the grid does
-	 * not.
+	 * On a region row, draw the line from the grid if the cell holds
+	 * isolate controls: a combined cell too long for the grid may hold
+	 * controls the grid does not.
 	 */
 	x = ctx->xoff + ctx->ocx - ctx->wox;
-	if ((ctx->style_ctx.bidi != 0 &&
+	if (((ctx->style_ctx.bidi &
+	    (TTY_STYLE_BIDI_ISOLATE|TTY_STYLE_BIDI_BALANCE)) &&
 	    tty_bidi_has_control(&ctx->cell->data)) ||
 	    tty_bidi_redraw(tty, ctx, ctx->ocy, ctx->ocx,
 	    ctx->cell->data.width)) {
