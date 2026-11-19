@@ -2,10 +2,13 @@
 
 # Test where a bidi-capable client writes the directional isolates of a pane
 # that starts at column 0. An inner tmux client (with the bidi terminal
-# feature) runs in a pane of an outer tmux; the bytes it writes for a refresh
-# are captured from the outer pane (pipe-pane -O) and checked as they are, with
-# the SGR sequences taken out, so the order of the isolates and the cells is
-# what is compared.
+# feature) runs in a pane of an outer tmux. A pane that fills the window is on
+# outer rows: the outer pane, in BDSM too, keeps the controls the inner client
+# writes at column 0 and capture-pane shows where it wrote them. A pane that
+# shares its rows is wrapped in isolate regions: the bytes the client writes
+# for a refresh are captured from the outer pane (pipe-pane -O) and checked as
+# they are, with the SGR sequences taken out, so the order of the isolates and
+# the cells is what is compared.
 
 PATH=/bin:/usr/bin
 TERM=screen
@@ -36,7 +39,8 @@ RIGHT='sleep 100'
 #   Show pane_output in the first pane of an inner session (split in two side
 #   by side panes if split is 1, the second showing $RIGHT), attach an inner
 #   client to it from an outer pane and save the bytes the inner client writes
-#   for the refresh in $RAW, and without SGR sequences in $TMP.
+#   for the refresh in $RAW, and without SGR sequences in $TMP, and the outer
+#   pane in $captured.
 inner() {
 	$TMUX kill-server 2>/dev/null
 	$TMUX2 kill-server 2>/dev/null
@@ -61,7 +65,25 @@ inner() {
 		exit_status=1
 		return 1
 	}
+	captured=$($TMUX capture-pane -p -t0:0.0)
 	sed "s/$ESC\[[0-9;]*m//g" "$RAW" >"$TMP"
+}
+
+# check <case> <pane_output> <expected>
+#   Show pane_output in a pane that fills the window and compare the start of
+#   row 1 of the outer pane with expected (printf format).
+check() {
+	inner "$1" "$2" 0 || return
+	actual=$(printf '%s\n' "$captured" | sed -n 1p)
+	expected=$(printf '%b' "$3")
+	case $actual in
+	"$expected"*) ;;
+	*)
+		echo "[FAIL] case $1: expected row to start with '$expected'," \
+		    "got '$actual'"
+		exit_status=1
+		;;
+	esac
 }
 
 # want <case> <split> <pane_output> <expected> <what>
@@ -85,29 +107,33 @@ count() {
 want 1 1 "\033[8h\033[?2501hשלום world" "\033[H${FSI}ש" \
     "the FSI right before the shin at row 1 column 1"
 
-# The closing isolate of the pane's own FSI goes after the space the cursor is
-# on, positioned there, and the pane's own isolate is not written before the
-# prompt glyph. The glyph is not one tmux and the terminal are known to give
-# the same width and still the FSI leads it. The full width row ends with the
-# cell and the PDI the terminal keeps in pending wrap, with no move in between.
-want 2 0 "\033[8h\033[?2501h❯ ${FSI}אני " \
-    "${FSI}❯ ${FSI}אני\033[K  \033[72C ${PDI}\033[1;8H${PDI}" \
-    "the pane's own PDI after the cursor cell and the last cell closed in pending wrap"
+# In a pane that fills the window the inner client writes no isolate of its own
+# before the shin, and the pane's own isolate after the prompt glyph (one tmux
+# and the terminal are not known to size alike) is kept where the pane wrote
+# it.
+check 9 "\033[8h\033[?2501hשלום world" "שלום world"
+check 2 "\033[8h\033[?2501h❯ ${FSI}אני " "❯ ${FSI}אני"
 
-# The pane's LRI at column 0 of a row it soft-wrapped into is dropped (the
-# terminal alone would not keep it there): the 80 a are followed by the PDI in
-# pending wrap and the next row is positioned explicitly and led by the FSI.
+# The pane's control at column 0 of a row it soft-wrapped into is dropped (the
+# terminal alone would not keep it there): row 1 stays the 80 a (no control at
+# its end, where the terminal is in pending wrap) and row 2 is just the c.
 inner 3 "\033[8h\033[?2501h${A80}b\r${LRI}c" 0 && {
-	[ "$(count "${A80}${PDI}\033[2;1H${FSI}c" "$TMP")" -eq 1 ] || {
-		echo "[FAIL] case 3: expected the 80 a closed in pending wrap" \
-		    "and row 2 positioned and led by an FSI"
+	row1=$(printf '%s\n' "$captured" | sed -n 1p)
+	row2=$(printf '%s\n' "$captured" | sed -n 2p)
+	[ "$row1" = "$A80" ] || {
+		echo "[FAIL] case 3: expected row 1 of 80 a, got '$row1'"
 		exit_status=1
 	}
-	[ "$(count "$LRI" "$TMP")" -eq 0 ] || {
-		echo "[FAIL] case 3: the inner client wrote the pane's LRI"
+	[ "$row2" = "c" ] || {
+		echo "[FAIL] case 3: expected row 2 'c', got '$row2'"
 		exit_status=1
 	}
 }
+
+# The same holds for a first cell the pane's control may lead (an a), and for
+# one it may not (the pointing hand).
+check 7 "\033[8h\033[?2501h${LRI}abc" "${LRI}abc"
+check 8 "\033[8h\033[?2501h☝ abc" "☝ abc"
 
 # check_shared <case> <left_pane_output> <lris> <pdis>
 #   In a row shared with another pane the pane's column-0 LRI stays at terminal
