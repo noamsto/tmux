@@ -3301,13 +3301,11 @@ screen_write_cell(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 
 	/*
 	 * Store the kept controls before the char so every redraw writes them
-	 * at column 0 ahead of it, where the terminal applies them. The
-	 * terminal drops them before a cell whose width it may see
-	 * differently, and on a row continuing a wrapped line it stores them
-	 * with the row above, so then they are dropped.
+	 * at column 0 ahead of it, where the terminal applies them whatever
+	 * the cell's width. On a row continuing a wrapped line the terminal
+	 * stores them with the row above, so then they are dropped.
 	 */
 	if (!screen_write_lead_target(ctx) ||
-	    !tty_bidi_agree(gc) ||
 	    n + gc->data.size >= UTF8_SIZE) {
 		screen_write_cell1(ctx, gc, 0);
 		return;

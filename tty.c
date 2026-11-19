@@ -654,6 +654,19 @@ tty_pane_bidi(struct window_pane *wp)
 	return (0);
 }
 
+/*
+ * Get the bidi style flags for a segment showing a pane: a bidi pane is
+ * wrapped in an isolate, and every pane's own isolates are balanced.
+ */
+int
+tty_segment_bidi(struct window_pane *wp)
+{
+	if (~wp->base.mode & MODE_BIDI)
+		return (TTY_STYLE_BIDI_BALANCE);
+	return (tty_pane_bidi(wp)|TTY_STYLE_BIDI_ISOLATE|
+	    TTY_STYLE_BIDI_BALANCE);
+}
+
 /* Note whether a visible pane uses bidi; no bytes are sent. */
 void
 tty_set_bidi(struct tty *tty, int on)
@@ -681,9 +694,9 @@ tty_set_bidi_ctx(struct tty *tty, struct tty_ctx *ctx)
 	if ((~tty->flags & TTY_BIDI) || wp == NULL)
 		return;
 
-	bits = tty_pane_bidi(wp);
-	if (!tty_full_width(tty, ctx))
-		bits |= TTY_STYLE_BIDI_ISOLATE;
+	bits = tty_segment_bidi(wp);
+	if (tty_full_width(tty, ctx))
+		bits &= ~TTY_STYLE_BIDI_ISOLATE;
 	ctx->style_ctx.bidi = bits;
 }
 
@@ -724,49 +737,18 @@ tty_bidi_lead_size(const struct grid_cell *gc)
 }
 
 /*
- * Does the terminal keep a control written at column 0 before this cell? Only
- * for a cell holding one character from a short list where tmux and the
- * terminal agree it is one column wide: for a cell the terminal makes another
- * width, it drops the control. A line drawing cell is never one: it is written
- * through the line drawing character set one byte at a time.
+ * Should the isolate controls a pane printed at column 0 be written before
+ * the cell at terminal column col? Only at column 0, where the terminal
+ * stores them with this cell whatever its width: elsewhere it would store
+ * them with the cell to the left. A line drawing cell is written through the
+ * line drawing character set one byte at a time, so never carries them.
  */
 int
-tty_bidi_agree(const struct grid_cell *gc)
+tty_bidi_keep_lead(int bits, const struct grid_cell *gc, u_int col)
 {
-	const struct utf8_data	*ud = &gc->data;
-	const u_char		*cp;
-	u_int			 n, c;
-
-	if (ud->width != 1 || (gc->flags & (GRID_FLAG_PADDING|GRID_FLAG_TAB)))
+	if ((bits & (TTY_STYLE_BIDI_ISOLATE|TTY_STYLE_BIDI_BALANCE)) == 0)
 		return (0);
-	if (gc->attr & GRID_ATTR_CHARSET)
-		return (0);
-	n = tty_bidi_lead_size(gc);
-	cp = ud->data + n;
-	if (ud->size == n + 1)
-		c = cp[0];
-	else if (ud->size == n + 2 && (cp[0] & 0xe0) == 0xc0)
-		c = ((cp[0] & 0x1f) << 6)|(cp[1] & 0x3f);
-	else
-		return (0);
-	return ((c >= 0x20 && c <= 0x7e) ||
-	    (c >= 0xc0 && c <= 0x24f) ||
-	    (c >= 0x386 && c <= 0x4ff) ||
-	    (c >= 0x5d0 && c <= 0x5ea) ||
-	    (c >= 0x620 && c <= 0x64a));
-}
-
-/*
- * Will the terminal keep the isolate controls at the front of the cell when it
- * is written at terminal column col? Only with the bidi mode, at column 0 and
- * for a cell whose width tmux and the terminal agree on.
- */
-int
-tty_bidi_lead_ok(struct tty *tty, const struct grid_cell *gc, u_int col)
-{
-	if ((~tty->flags & TTY_BIDI) || col != 0)
-		return (0);
-	return (tty_bidi_agree(gc));
+	return (col == 0 && (~gc->attr & GRID_ATTR_CHARSET));
 }
 
 /*
@@ -802,15 +784,16 @@ tty_bidi_has_control(const struct utf8_data *ud)
 }
 
 /*
- * Count the isolates the pane's own text leaves open in cells px to px + nx - 1
- * of line py of an isolated pane. Also return the cell after the last
- * non-blank one, the number of isolate controls seen and the number of PDIs
- * with no initiator. An isolated row never keeps leading controls, so they
- * are not counted.
+ * Balance the isolate controls the text in cells px to px + nx - 1 of line py
+ * holds, where a PDI with no initiator open is dropped. Return the number of
+ * initiators left open, the number of controls seen and the cell after the
+ * last non-blank one: a cell holding anything but a space, including a
+ * control, whatever its background. The first cell's leading controls count
+ * only if lead is set, because the cell goes to terminal column 0.
  */
-static u_int
-tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int *last,
-    u_int *controls, u_int *unmatched)
+void
+tty_bidi_balance(struct screen *s, u_int px, u_int py, u_int nx, int lead,
+    u_int *last, u_int *controls, u_int *open)
 {
 	struct grid_cell	 gc;
 	const u_char		*cp;
@@ -818,15 +801,16 @@ tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int *last,
 
 	*last = 0;
 	*controls = 0;
-	*unmatched = 0;
-	for (i = px; i < px + nx; i++) {
-		grid_view_get_cell(s->grid, i, py, &gc);
+	for (i = 0; i < nx; i++) {
+		grid_view_get_cell(s->grid, px + i, py, &gc);
+		if (i != 0 || !lead || (gc.attr & GRID_ATTR_CHARSET))
+			tty_bidi_unlead(&gc);
 		if ((gc.flags & GRID_FLAG_PADDING) ||
 		    gc.data.size != 1 ||
 		    gc.data.data[0] != ' ')
-			*last = i - px + 1;
+			*last = i + 1;
 		cp = gc.data.data;
-		for (j = tty_bidi_lead_size(&gc); j + 2 < gc.data.size; j++) {
+		for (j = 0; j + 2 < gc.data.size; j++) {
 			if (cp[j] != 0xe2 || cp[j + 1] != 0x81)
 				continue;
 			if (cp[j + 2] >= 0xa6 && cp[j + 2] <= 0xa8) {
@@ -835,59 +819,115 @@ tty_bidi_scan(struct screen *s, u_int px, u_int py, u_int nx, u_int *last,
 			} else if (cp[j + 2] == 0xa9) {
 				if (depth > 0)
 					depth--;
-				else
-					(*unmatched)++;
 				(*controls)++;
 			}
 		}
 	}
-	return (depth);
+	*open = depth;
 }
 
-/*
- * Should the pane's own isolate controls in these cells be kept? Too many,
- * counting the PDIs added to close them, make the terminal ignore every
- * isolate on the line and an unmatched PDI would close the one around the
- * pane, so then they are all dropped.
- */
-int
-tty_bidi_keep(struct screen *s, u_int px, u_int py, u_int nx)
+/* Write PDIs. */
+static void
+tty_bidi_pdi(struct tty *tty, u_int n)
 {
-	u_int	last, controls, unmatched, depth;
+	u_int	i;
 
-	depth = tty_bidi_scan(s, px, py, nx, &last, &controls, &unmatched);
-	return (controls + depth <= 2 && unmatched == 0);
+	for (i = 0; i < n; i++)
+		tty_putn(tty, "\342\201\251", 3, 0); /* PDI */
 }
 
 /*
- * Close an isolate at x,y, including any isolates the pane's own text in the
- * given cells left open. Those are closed right after the last non-blank cell,
- * or at the pane cursor (cx,cy) if that is further right on its row, so blanks
- * typed before the cursor stay inside the isolate.
+ * Rewrite the last cell of a segment from the grid at the last terminal
+ * column, so the terminal waits to wrap there and stores a control written
+ * next in that cell. A wide character is rewritten whole.
+ */
+static void
+tty_bidi_close_last(struct tty *tty, struct screen *s, u_int px, u_int py,
+    u_int nx, u_int y, const struct tty_style_ctx *style_ctx)
+{
+	struct tty_style_ctx	 sc;
+	struct grid_cell	 gc;
+	u_int			 w = 1;
+
+	grid_view_get_cell(s->grid, px + nx - 1, py, &gc);
+	if ((gc.flags & GRID_FLAG_PADDING) && nx > 1)
+		w = 2;
+	if (style_ctx != NULL)
+		memcpy(&sc, style_ctx, sizeof sc);
+	else {
+		memset(&sc, 0, sizeof sc);
+		sc.defaults = &grid_default_cell;
+		sc.hyperlinks = s->hyperlinks;
+	}
+	sc.bidi &= ~TTY_STYLE_BIDI_ISOLATE;
+	tty_draw_line(tty, s, px + nx - w, py, w, tty->sx - w, y, &sc);
+}
+
+/*
+ * Write n PDIs into the last cell of row y, which needs the terminal to be
+ * waiting to wrap at the end of that row. Without automargin it never is, so
+ * the region is left unclosed.
+ */
+static void
+tty_bidi_close_end(struct tty *tty, struct screen *s, u_int px, u_int py,
+    u_int nx, u_int y, u_int n, const struct tty_style_ctx *style_ctx)
+{
+	if (tty->term->flags & TERM_NOAM) {
+		log_debug("%s: region not closed", __func__);
+		return;
+	}
+	if ((tty->cx != tty->sx || tty->cy != y) && s != NULL)
+		tty_bidi_close_last(tty, s, px, py, nx, y, style_ctx);
+	if (tty->cx != tty->sx || tty->cy != y) {
+		log_debug("%s: region not closed", __func__);
+		return;
+	}
+	tty_bidi_pdi(tty, n);
+}
+
+/*
+ * Close the isolates of a segment drawn from cells px to px + nx - 1 of line
+ * py of s and ending before terminal column x on row y. The isolates its own
+ * text leaves open are closed right after the last non-blank cell, or at the
+ * pane cursor (cx,cy) if that is further right on its row, so blanks typed
+ * before the cursor stay inside them. Then, for a segment tmux wraps in an
+ * isolate, its PDI goes in the segment's last cell; a blank segment at
+ * column 0 has no initiator, so gets none.
  */
 void
 tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
-    u_int nx, u_int x, u_int y, u_int cx, u_int cy)
+    u_int nx, u_int x, u_int y, u_int cx, u_int cy, int bits,
+    const struct tty_style_ctx *style_ctx)
 {
-	u_int	i, last = nx, controls, unmatched, depth = 0;
+	u_int	last = nx, at, controls, open = 0, end = 0;
 
 	if (s != NULL) {
-		depth = tty_bidi_scan(s, px, py, nx, &last, &controls,
-		    &unmatched);
-		if (controls + depth > 2 || unmatched != 0)
-			depth = 0;
-		else if (depth > 0 && cx != UINT_MAX && cy == py && cx > px &&
-		    last < cx - px)
-			last = cx - px < nx ? cx - px : nx;
+		tty_bidi_balance(s, px, py, nx, x == nx, &last, &controls,
+		    &open);
+		if (x == nx && last == 0)
+			bits &= ~TTY_STYLE_BIDI_ISOLATE;
 	}
+	at = last;
+	if (open != 0 && cx != UINT_MAX && cy == py && cx > px &&
+	    at < cx - px)
+		at = cx - px < nx ? cx - px : nx;
+	if (open != 0 && at == nx) {
+		end = open;
+		open = 0;
+	}
+	if (bits & TTY_STYLE_BIDI_ISOLATE)
+		end++;
 
-	if (depth > 0) {
-		tty_cursor(tty, x - nx + last, y);
-		for (i = 0; i < depth; i++)
-			tty_putn(tty, "\342\201\251", 3, 0); /* PDI */
+	if (end != 0 && x == tty->sx)
+		tty_bidi_close_end(tty, s, px, py, nx, y, end, style_ctx);
+	if (open != 0) {
+		tty_cursor(tty, x - nx + at, y);
+		tty_bidi_pdi(tty, open);
 	}
-	tty_cursor(tty, x, y);
-	tty_putn(tty, "\342\201\251", 3, 0); /* PDI */
+	if (end != 0 && x < tty->sx) {
+		tty_cursor(tty, x, y);
+		tty_bidi_pdi(tty, end);
+	}
 }
 
 void
@@ -1746,14 +1786,9 @@ tty_bidi_line(struct tty *tty, const struct tty_ctx *ctx, u_int py, u_int px,
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return;
 
-	if (x + rx < tty->sx && px < i + rx && px + nx >= i + rx) {
+	if (px < i + rx && px + nx >= i + rx)
 		tty_bidi_close(tty, ctx->s, i, py, rx, x + rx, ry,
-		    ctx->cursor_x, ctx->cursor_y);
-		if (status_side_at_column(tty->client) > 0 &&
-		    (u_int)status_side_at_column(tty->client) == x + rx)
-			tty_bidi_isolate(tty, TTY_STYLE_BIDI_ISOLATE, x + rx,
-			    ry);
-	}
+		    ctx->cursor_x, ctx->cursor_y, bits, &ctx->style_ctx);
 }
 
 /*
@@ -1795,20 +1830,20 @@ tty_draw_pane(struct tty *tty, const struct tty_ctx *ctx, u_int py)
  * Fix the isolate controls after a partial write. A line holding isolate
  * controls of its own is redrawn whole because the controls closing them follow
  * the last non-blank cell, which moves as text is written. So is a write at
- * terminal column 0, where the initiator goes before or after the first cell.
+ * terminal column 0, where the initiator goes before the first cell.
  */
 static void
 tty_bidi_partial(struct tty *tty, const struct tty_ctx *ctx, u_int py,
     u_int px, u_int nx)
 {
-	u_int	i, x, rx, ry, last, controls, unmatched;
+	u_int	i, x, rx, ry, last, controls, open;
 
 	if (~ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE)
 		return;
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return;
 
-	tty_bidi_scan(ctx->s, i, py, rx, &last, &controls, &unmatched);
+	tty_bidi_balance(ctx->s, i, py, rx, x == 0, &last, &controls, &open);
 	if (controls != 0 || (x == 0 && px <= i && px + nx > i))
 		tty_draw_pane(tty, ctx, py);
 	else
@@ -2354,7 +2389,7 @@ tty_cmd_cell(struct tty *tty, const struct tty_ctx *ctx)
 	 * terminal waits to wrap from the row above.
 	 */
 	memcpy(&gc, ctx->cell, sizeof gc);
-	if (!tty_bidi_lead_ok(tty, &gc, x))
+	if (!tty_bidi_keep_lead(ctx->style_ctx.bidi, &gc, x))
 		tty_bidi_unlead(&gc);
 	if (tty_bidi_lead_size(&gc) != 0)
 		tty_cursor_pane(tty, ctx, ctx->ocx, ctx->ocy);

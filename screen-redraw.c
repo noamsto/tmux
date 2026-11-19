@@ -1337,23 +1337,15 @@ redraw_set_bidi_flags(struct redraw_draw_ctx *dctx)
 static int
 redraw_bidi_get(struct redraw_draw_ctx *dctx, struct redraw_span *span)
 {
-	struct tty	*tty = &dctx->scene->c->tty;
-	int		 full;
-
 	if (~dctx->flags & REDRAW_BIDI)
 		return (0);
-	full = (dctx->side_left + span->x == 0 && span->width >= tty->sx);
 
 	switch (span->data.type) {
 	case REDRAW_SPAN_PANE:
-		if (full)
-			return (tty_pane_bidi(span->data.p.wp));
-		return (tty_pane_bidi(span->data.p.wp)|TTY_STYLE_BIDI_ISOLATE);
+		return (tty_segment_bidi(span->data.p.wp));
 	case REDRAW_SPAN_MENU:
 	case REDRAW_SPAN_STATUS:
-		if (full)
-			return (0);
-		return (TTY_STYLE_BIDI_ISOLATE);
+		return (TTY_STYLE_BIDI_BALANCE);
 	default:
 		return (0);
 	}
@@ -1418,7 +1410,10 @@ redraw_bidi_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 	struct tty		*tty = &c->tty;
 	struct redraw_line	*line;
 	struct redraw_span	*next;
+	struct window_pane	*wp;
 	struct screen		*s = NULL;
+	struct grid_cell	 defaults;
+	struct tty_style_ctx	 style_ctx = { 0 };
 	u_int			 x0, x1, px = 0, py = 0, n = span->width;
 	u_int			 cx = UINT_MAX, cy = UINT_MAX;
 	int			 bits, next_bits;
@@ -1427,55 +1422,59 @@ redraw_bidi_span(struct redraw_draw_ctx *dctx, struct redraw_span *span,
 	x1 = x0 + span->width;
 	bits = redraw_bidi_get(dctx, span);
 
-	if (bits & TTY_STYLE_BIDI_ISOLATE) {
-		if (x1 < tty->sx) {
-			if (prompt != NULL) {
-				s = prompt;
+	if (bits != 0) {
+		style_ctx.defaults = &grid_default_cell;
+		if (prompt != NULL) {
+			s = prompt;
+			px = span->data.p.px;
+		} else {
+			switch (span->data.type) {
+			case REDRAW_SPAN_PANE:
+				wp = span->data.p.wp;
+				s = wp->screen;
 				px = span->data.p.px;
-			} else {
-				switch (span->data.type) {
-				case REDRAW_SPAN_PANE:
-					s = span->data.p.wp->screen;
-					px = span->data.p.px;
-					py = span->data.p.py;
-					break;
-				case REDRAW_SPAN_STATUS:
-					s = &span->data.st.wp->status_screen;
-					px = span->data.st.offset;
-					if (px >= screen_size_x(s))
-						s = NULL;
-					else if (n > screen_size_x(s) - px)
-						n = screen_size_x(s) - px;
-					break;
-				case REDRAW_SPAN_MENU:
-					s = menu_screen(span->data.m.md);
-					px = span->data.m.px;
-					py = span->data.m.py;
-					break;
-				default:
-					break;
+				py = span->data.p.py;
+				if (s == &wp->base) {
+					cx = s->cx;
+					cy = s->cy;
 				}
+				tty_default_colours(&defaults, wp,
+				    &style_ctx.dim);
+				style_ctx.defaults = &defaults;
+				style_ctx.palette = &wp->palette;
+				break;
+			case REDRAW_SPAN_STATUS:
+				s = &span->data.st.wp->status_screen;
+				px = span->data.st.offset;
+				if (px >= screen_size_x(s))
+					s = NULL;
+				else if (n > screen_size_x(s) - px)
+					n = screen_size_x(s) - px;
+				style_ctx.dim = span->data.st.wp->status_dim;
+				break;
+			case REDRAW_SPAN_MENU:
+				s = menu_screen(span->data.m.md);
+				px = span->data.m.px;
+				py = span->data.m.py;
+				break;
+			default:
+				break;
 			}
-			if (prompt == NULL &&
-			    span->data.type == REDRAW_SPAN_PANE &&
-			    span->data.p.wp->screen == &span->data.p.wp->base) {
-				cx = span->data.p.wp->screen->cx;
-				cy = span->data.p.wp->screen->cy;
-			}
-			tty_bidi_close(tty, s, px, py, n, x1, y, cx, cy);
+		}
+		if (s != NULL) {
+			style_ctx.hyperlinks = s->hyperlinks;
+			style_ctx.bidi = bits;
+			tty_bidi_close(tty, s, px, py, n, x0 + n, y, cx, cy,
+			    bits, &style_ctx);
 		}
 	}
 	if (x1 >= tty->sx || (line = redraw_get_line(dctx, y)) == NULL)
 		return;
 
 	next = redraw_find_span(line, span->x + span->width);
-	if (next != NULL)
-		next_bits = redraw_bidi_get(dctx, next);
-	else if (span->x + span->width == scene->sx &&
-	    status_side_at_column(c) > 0)
-		next_bits = TTY_STYLE_BIDI_ISOLATE;
-	else
+	if (next == NULL)
 		return;
+	next_bits = redraw_bidi_get(dctx, next);
 	if (next_bits & TTY_STYLE_BIDI_ISOLATE)
 		tty_bidi_isolate(tty, next_bits, x1, y);
 }
@@ -2155,9 +2154,13 @@ redraw_draw_pane_prompt(struct redraw_draw_ctx *dctx, struct window_pane *wp)
 	screen_free(&screen);
 }
 
-/* Write the isolate controls for a side status line that was just drawn. */
+/*
+ * Write the isolate controls for a side status line that was just drawn at
+ * column x: its own PDIs, then the initiator of the span to its right.
+ */
 static void
-redraw_bidi_side_status(struct redraw_draw_ctx *dctx, u_int y, u_int row)
+redraw_bidi_side_status(struct redraw_draw_ctx *dctx, u_int x, u_int y,
+    u_int row, const struct tty_style_ctx *style_ctx)
 {
 	struct redraw_scene	*scene = dctx->scene;
 	struct client		*c = scene->c;
@@ -2167,14 +2170,10 @@ redraw_bidi_side_status(struct redraw_draw_ctx *dctx, u_int y, u_int row)
 	u_int			 width = status_side_size(c);
 	int			 bits;
 
-	if ((line = redraw_get_line(dctx, y)) == NULL)
+	tty_bidi_close(tty, &c->side_status.screen, 0, row, width, x + width,
+	    y, UINT_MAX, UINT_MAX, TTY_STYLE_BIDI_BALANCE, style_ctx);
+	if (x != 0 || (line = redraw_get_line(dctx, y)) == NULL)
 		return;
-
-	if (status_side_at_column(c) != 0)
-		return;
-
-	tty_bidi_close(tty, &c->side_status.screen, 0, row, width, width, y,
-	    UINT_MAX, UINT_MAX);
 	if ((span = redraw_find_span(line, 0)) == NULL)
 		return;
 	bits = redraw_bidi_get(dctx, span);
@@ -2337,7 +2336,7 @@ redraw_draw(struct client *c, struct window_pane *wp, int flags)
 			else
 				y = 0;
 			if (dctx.flags & REDRAW_BIDI)
-				bidi = TTY_STYLE_BIDI_ISOLATE;
+				bidi = TTY_STYLE_BIDI_BALANCE;
 			else
 				bidi = 0;
 			sc = redraw_bidi_style(&style_ctx,
@@ -2346,7 +2345,8 @@ redraw_draw(struct client *c, struct window_pane *wp, int flags)
 				tty_draw_line(tty, &c->side_status.screen, 0, i,
 				    side_width, side_x, y + i, sc);
 				if (sc != NULL)
-					redraw_bidi_side_status(&dctx, y + i, i);
+					redraw_bidi_side_status(&dctx, side_x,
+					    y + i, i, sc);
 			}
 		}
 	}
