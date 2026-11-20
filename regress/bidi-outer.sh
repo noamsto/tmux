@@ -644,6 +644,45 @@ attach
 wide_row dch-float '\033[P' "DCH" "$WIDE80"
 wide_row ich-float '\033[@' "ICH" "$WIDE80"
 
+# A window bigger than the client, panned right: a bidi pane at column 0 wider
+# than the client but ending before the right edge of the part shown shares
+# its rows with the pane right of it, so they are region rows: its visible
+# part goes in an isolate and BDSM stays off.
+setup
+$TMUX2 resize-window -x160 -y5 || exit 1
+write %0 "$BDSM_ON; printf '%090d $HEB abc\\n' 0"
+$TMUX2 splitw -h -l59 "$PANE" || exit 1
+sleep 0.3
+write %1 "printf 'RIGHT\\n'"
+attach
+since
+expect_none panned "\033[8h" "CSI 8 h (the pane does not own its rows)"
+expect panned "${FSI}0000000000 $HEB abc ${PDI}" \
+    "the visible part of the bidi pane in an isolate"
+
+# A bidi pane in a split leaving more initiators open than the terminal keeps
+# in one cell: only the first 8 are written, and its last cell holds 9 PDIs,
+# 8 for them and one for the region's own initiator.
+setup
+$TMUX2 splitw -h "$PANE" || exit 1
+sleep 0.3
+write %0 "$BDSM_ON; printf x; i=0; while [ \$i -lt 20 ]; do printf '\\342\\201\\246a'; i=\$((i + 1)); done"
+attach
+since
+expect deep "${FSI}x${LRI}a${LRI}a${LRI}a${LRI}a${LRI}a${LRI}a${LRI}a${LRI}aaaaaaaaaaaaa" \
+    "8 of the pane's initiators written"
+expect deep "$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI" "9 PDIs closing the region"
+expect_none deep "$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI" "more than 9 PDIs in a row"
+expect_balanced deep
+
+# The same pane typing more initiators than it keeps after the client
+# attached: every line redraw and closer rewrite writes at most 9 PDIs.
+mark
+write %0 "printf '\\ny'; i=0; while [ \$i -lt 30 ]; do printf '\\342\\201\\246b'; sleep 0.01; i=\$((i + 1)); done; printf '\\342\\201\\251\\342\\201\\251c'"
+since
+expect deep-typed "$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI" "9 PDIs closing the region"
+expect_none deep-typed "$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI" "more than 9 PDIs in a row"
+
 # -T bidi with no bidi pane writes the same bytes as no bidi feature, for the
 # writes after the attach settled.
 # off_run <features> <file> [bidi]

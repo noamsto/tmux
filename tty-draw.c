@@ -115,6 +115,12 @@ tty_draw_line_get_empty(const struct grid_cell *gc,
 	return (empty);
 }
 
+/*
+ * Initiators a segment tmux wraps in an isolate keeps open: they are all closed
+ * in its last cell, and a terminal keeps only a few code points in one cell.
+ */
+#define TTY_DRAW_LINE_DEPTH_MAX 8
+
 /* Isolate controls of a segment being balanced. */
 struct tty_draw_line_bidi {
 	u_int	 depth;		/* initiators open */
@@ -122,6 +128,8 @@ struct tty_draw_line_bidi {
 	u_int	*drop;		/* numbers of the initiators to drop */
 	u_int	 ndrop;
 	u_int	 next;
+	u_int	 max;		/* depth kept, deeper initiators are dropped */
+	u_int	 skipped;	/* dropped initiators no PDI closes yet */
 };
 
 /* Get cell px of line py as drawn at terminal column atx. */
@@ -150,7 +158,10 @@ tty_draw_line_get_cell(__unused struct tty *tty, struct screen *s, u_int px,
  * closes, and find the cell after the last control and the non-blank cells:
  * padding, or a cell holding anything but a space (a control included),
  * whatever its background. If b is not NULL, also number those initiators in
- * order from 0, counting every initiator tty_draw_line_balance sees.
+ * order from 0, counting every initiator tty_draw_line_balance sees. In a
+ * segment tmux wraps in an isolate, an initiator deeper than
+ * TTY_DRAW_LINE_DEPTH_MAX is dropped with the PDI closing it; they still count
+ * as controls, because a write that removes one changes the controls after it.
  */
 static void
 tty_draw_line_scan(__unused struct tty *tty, struct screen *s, u_int px,
@@ -161,7 +172,10 @@ tty_draw_line_scan(__unused struct tty *tty, struct screen *s, u_int px,
 	const struct grid_cell	*gcp;
 	const u_char		*cp;
 	u_int			 i, j, next = 0, seen = 0, size = 0;
+	u_int			 max = UINT_MAX, skipped = 0;
 
+	if (bits & TTY_STYLE_BIDI_ISOLATE)
+		max = TTY_DRAW_LINE_DEPTH_MAX;
 	sc->controls = 0;
 	sc->open = 0;
 	sc->first = nx;
@@ -209,6 +223,10 @@ tty_draw_line_scan(__unused struct tty *tty, struct screen *s, u_int px,
 			if (cp[j + 2] >= 0xa6 && cp[j + 2] <= 0xa8) {
 				sc->controls++;
 				sc->lastctl = next;
+				if (sc->open >= max) {
+					skipped++;
+					continue;
+				}
 				sc->open++;
 				if (b == NULL)
 					continue;
@@ -221,6 +239,10 @@ tty_draw_line_scan(__unused struct tty *tty, struct screen *s, u_int px,
 			} else if (cp[j + 2] == 0xa9) {
 				sc->controls++;
 				sc->lastctl = next;
+				if (skipped != 0) {
+					skipped--;
+					continue;
+				}
 				if (sc->open == 0)
 					continue;
 				sc->open--;
@@ -244,9 +266,10 @@ tty_draw_line_bidi_scan(struct tty *tty, struct screen *s, u_int px, u_int py,
 
 /*
  * Copy cell data, dropping a PDI with no initiator open in the segment so it
- * cannot close an isolate around it, and the initiators the segment never
- * closes. A line drawing cell is written one byte at a time through the line
- * drawing character set, so every control in it is dropped.
+ * cannot close an isolate around it, the initiators the segment never closes
+ * and those deeper than b->max with the PDIs closing them. A line drawing cell
+ * is written one byte at a time through the line drawing character set, so
+ * every control in it is dropped.
  */
 static size_t
 tty_draw_line_balance(char *buf, const struct grid_cell *gc,
@@ -267,6 +290,11 @@ tty_draw_line_balance(char *buf, const struct grid_cell *gc,
 				continue;
 			}
 			if (ud->data[i + 2] == 0xa9) {
+				if (b->skipped != 0) {
+					b->skipped--;
+					i += 2;
+					continue;
+				}
 				if (b->depth == 0) {
 					i += 2;
 					continue;
@@ -277,6 +305,11 @@ tty_draw_line_balance(char *buf, const struct grid_cell *gc,
 				if (b->next != b->ndrop &&
 				    b->drop[b->next] == n) {
 					b->next++;
+					i += 2;
+					continue;
+				}
+				if (b->depth >= b->max) {
+					b->skipped++;
 					i += 2;
 					continue;
 				}
@@ -351,12 +384,14 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 
 	/*
 	 * A segment tmux does not wrap in an isolate is laid out alone, where
-	 * an initiator left open makes no isolate, so drop those.
+	 * an initiator left open makes no isolate, so drop those. One it wraps
+	 * keeps only a few of its own initiators open.
 	 */
-	if ((bits & TTY_STYLE_BIDI_BALANCE) &&
-	    (~bits & TTY_STYLE_BIDI_ISOLATE)) {
+	bidi.max = UINT_MAX;
+	if (bits & TTY_STYLE_BIDI_ISOLATE)
+		bidi.max = TTY_DRAW_LINE_DEPTH_MAX;
+	else if (bits & TTY_STYLE_BIDI_BALANCE)
 		tty_draw_line_scan(tty, s, px, py, nx, atx, bits, &sc, &bidi);
-	}
 
 	/*
 	 * Turn off cursor while redrawing and reset region and margins. With
@@ -403,7 +438,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	 * isolate.
 	 */
 	if ((bits & TTY_STYLE_BIDI_ISOLATE) && atx == 0) {
-		tty_bidi_balance(tty, s, px, py, nx, 1, &sc);
+		tty_bidi_balance(tty, s, px, py, nx, 1, bits, &sc);
 		if (sc.last != 0 &&
 		    (bits & TTY_STYLE_BIDI_OUTER) &&
 		    cx == 0 &&

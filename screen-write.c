@@ -180,18 +180,6 @@ screen_write_set_client_cb(struct tty_ctx *ttyctx, struct client *c)
 		wp->flags |= (PANE_REDRAW|PANE_REDRAWSCROLLBAR);
 		return (-1);
 	}
-	if ((c->tty.flags & TTY_BIDI) &&
-	    window_has_floating_panes(wp->window) &&
-	    tty_bidi_rows_changed(&c->tty, wp->window)) {
-		/*
-		 * A floating pane moved without a full redraw, so the outer
-		 * bidi rows are out of date: redraw the window.
-		 */
-		log_debug("%s: bidi rows changed, redrawing", __func__);
-		c->flags |= CLIENT_REDRAWWINDOW;
-		wp->flags |= (PANE_REDRAW|PANE_REDRAWSCROLLBAR);
-		return (-1);
-	}
 
 	if (tty_window_offset(&c->tty, &ttyctx->wox, &ttyctx->woy, &ttyctx->wsx,
 	    &ttyctx->wsy))

@@ -689,7 +689,9 @@ tty_segment_bidi(struct window_pane *wp)
  * mode? It must fill the terminal width alone: this is tty_full_width on the
  * pane's context, with the x offset screen_write_set_client_cb gives it, and
  * no other floating pane may overlap it. A floating pane filling the width
- * on top owns its rows.
+ * on top owns its rows. tty_full_width ignores the window offset, so a pane
+ * in a window bigger than the terminal must also reach the right edge of the
+ * part shown.
  */
 int
 tty_bidi_owner(struct tty *tty, struct window_pane *wp)
@@ -697,6 +699,7 @@ tty_bidi_owner(struct tty *tty, struct window_pane *wp)
 	struct client		*c = tty->client;
 	struct window_pane	*fwp;
 	int			 xoff = wp->xoff;
+	u_int			 ox, oy, sx, sy;
 
 	if (!tty_has_bidi(tty))
 		return (0);
@@ -710,48 +713,66 @@ tty_bidi_owner(struct tty *tty, struct window_pane *wp)
 		    window_pane_floating_overlaps(fwp, wp))
 			return (0);
 	}
+	if (tty_window_offset(tty, &ox, &oy, &sx, &sy) && wp->sx < ox + sx)
+		return (0);
 	if (status_side_at_column(c) == 0)
 		xoff += status_side_size(c);
 	return (xoff == 0 && wp->sx >= tty->sx);
 }
 
 /*
- * Build the outer rows of window w on this terminal, indexed by terminal row,
- * with the offsets screen_write_set_client_cb uses. The map is NULL if there
- * are none.
+ * Get the terminal rows y0 to y1 - 1 a pane owns on this terminal, with the
+ * offsets screen_write_set_client_cb uses. Return 0 if it owns none.
+ */
+static int
+tty_bidi_owner_rows(struct tty *tty, struct window_pane *wp, u_int *y0,
+    u_int *y1)
+{
+	struct client	*c = tty->client;
+	u_int		 ox, oy, sx, sy, top = 0;
+	int		 start, end;
+
+	if (!tty_bidi_owner(tty, wp))
+		return (0);
+	tty_window_offset(tty, &ox, &oy, &sx, &sy);
+	if (status_at_line(c) == 0)
+		top = status_line_size(c);
+	start = wp->yoff - (int)oy;
+	end = start + (int)wp->sy;
+	if (start < 0)
+		start = 0;
+	if (end > (int)sy)
+		end = sy;
+	start += top;
+	end += top;
+	if (end > (int)tty->sy)
+		end = tty->sy;
+	if (start >= end)
+		return (0);
+	*y0 = start;
+	*y1 = end;
+	return (1);
+}
+
+/*
+ * Build the outer rows of window w on this terminal, indexed by terminal row.
+ * The map is NULL if there are none.
  */
 static void
 tty_bidi_rows(struct tty *tty, struct window *w, u_char **map, u_int *n)
 {
-	struct client		*c = tty->client;
 	struct window_pane	*wp;
-	u_int			 ox, oy, sx, sy, top = 0;
-	int			 y, y0, y1;
+	u_int			 y0, y1;
 
 	*map = NULL;
 	*n = tty->sy;
 
-	tty_window_offset(tty, &ox, &oy, &sx, &sy);
-	if (status_at_line(c) == 0)
-		top = status_line_size(c);
 	TAILQ_FOREACH(wp, &w->panes, entry) {
-		if (!tty_bidi_owner(tty, wp))
+		if (!tty_bidi_owner_rows(tty, wp, &y0, &y1))
 			continue;
-		y0 = wp->yoff - (int)oy;
-		y1 = y0 + (int)wp->sy;
-		if (y0 < 0)
-			y0 = 0;
-		if (y1 > (int)sy)
-			y1 = sy;
-		y0 += top;
-		y1 += top;
-		if (y1 > (int)tty->sy)
-			y1 = tty->sy;
-		for (y = y0; y < y1; y++) {
-			if (*map == NULL)
-				*map = xcalloc(tty->sy, 1);
-			(*map)[y] = 1;
-		}
+		if (*map == NULL)
+			*map = xcalloc(tty->sy, 1);
+		memset(*map + y0, 1, y1 - y0);
 	}
 }
 
@@ -766,18 +787,33 @@ tty_bidi_rows_differ(struct tty *tty, const u_char *map, u_int n)
 	return (memcmp(map, tty->bidi_rows, n) != 0);
 }
 
-/* Have the outer rows of window w changed since they were stored? */
+/*
+ * Have the outer rows of window w changed since they were stored? No two
+ * owners share a row, so the rows match if every owned row is stored and as
+ * many are.
+ */
 int
 tty_bidi_rows_changed(struct tty *tty, struct window *w)
 {
-	u_char	*map;
-	u_int	 n;
-	int	 changed;
+	struct window_pane	*wp;
+	u_int			 y, y0, y1, n = 0;
 
-	tty_bidi_rows(tty, w, &map, &n);
-	changed = tty_bidi_rows_differ(tty, map, n);
-	free(map);
-	return (changed);
+	if (tty->bidi_rows != NULL && tty->bidi_nrows != tty->sy)
+		return (1);
+	TAILQ_FOREACH(wp, &w->panes, entry) {
+		if (!tty_bidi_owner_rows(tty, wp, &y0, &y1))
+			continue;
+		for (y = y0; y < y1; y++) {
+			if (!tty_bidi_outer_row(tty, y))
+				return (1);
+		}
+		n += y1 - y0;
+	}
+	for (y = 0; y < tty->bidi_nrows; y++) {
+		if (tty->bidi_rows[y])
+			n--;
+	}
+	return (n != 0);
 }
 
 /* Forget the stored outer rows. */
@@ -888,8 +924,6 @@ tty_set_bidi_ctx(struct tty *tty, struct tty_ctx *ctx)
 static void
 tty_bidi_mode(struct tty *tty, int bits)
 {
-	if (!tty_has_bidi(tty))
-		return;
 	if (~bits & TTY_STYLE_BIDI_OUTER) {
 		if (tty->flags & TTY_BIDIBDSM) {
 			tty_putcode(tty, TTYC_DSBIDI);
@@ -898,6 +932,8 @@ tty_bidi_mode(struct tty *tty, int bits)
 		return;
 	}
 	if (~tty->flags & TTY_BIDIBDSM) {
+		if (!tty_has_bidi(tty))
+			return;
 		tty_putcode(tty, TTYC_ENBIDI);
 		tty->flags |= TTY_BIDIBDSM;
 	}
@@ -1050,18 +1086,19 @@ tty_bidi_has_control(const struct utf8_data *ud)
 
 /*
  * Balance the isolate controls tty_draw_line writes for cells px to px + nx - 1
- * of line py, where a PDI with no initiator open is dropped: count the
- * initiators left open and the controls written, and find the non-blank cells,
- * which hold anything but a space (a control included) whatever their
- * background. The first cell's leading controls count only if lead is set,
- * because the cell goes to terminal column 0.
+ * of line py of a segment with bidi style flags bits, where a PDI with no
+ * initiator open is dropped: count the initiators left open and the controls
+ * written, and find the non-blank cells, which hold anything but a space (a
+ * control included) whatever their background. The first cell's leading
+ * controls count only if lead is set, because the cell goes to terminal
+ * column 0.
  */
 void
 tty_bidi_balance(struct tty *tty, struct screen *s, u_int px, u_int py,
-    u_int nx, int lead, struct tty_bidi_scan *sc)
+    u_int nx, int lead, int bits, struct tty_bidi_scan *sc)
 {
 	tty_draw_line_bidi_scan(tty, s, px, py, nx, lead ? 0 : 1,
-	    TTY_STYLE_BIDI_BALANCE, sc);
+	    TTY_STYLE_BIDI_BALANCE|(bits & TTY_STYLE_BIDI_ISOLATE), sc);
 }
 
 /* Write PDIs. */
@@ -1155,7 +1192,7 @@ tty_bidi_close(struct tty *tty, struct screen *s, u_int px, u_int py,
 			grid_view_get_cell(s->grid, px, py, &gc);
 			lead = tty_bidi_keep_lead(bits, &gc, 0);
 		}
-		tty_bidi_balance(tty, s, px, py, nx, lead, &sc);
+		tty_bidi_balance(tty, s, px, py, nx, lead, bits, &sc);
 		n = sc.open;
 		if (x == nx && sc.last == 0)
 			bits &= ~TTY_STYLE_BIDI_ISOLATE;
@@ -2101,7 +2138,7 @@ tty_bidi_redraw(struct tty *tty, const struct tty_ctx *ctx, u_int py,
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return (0);
 
-	tty_bidi_balance(tty, ctx->s, i, py, rx, x == 0, &sc);
+	tty_bidi_balance(tty, ctx->s, i, py, rx, x == 0, bits, &sc);
 	if (sc.controls != 0) {
 		if ((~bits & TTY_STYLE_BIDI_ISOLATE) || px < i + sc.lastctl)
 			return (1);
@@ -2128,7 +2165,8 @@ tty_bidi_controls(struct tty *tty, const struct tty_ctx *ctx, u_int py)
 		return (0);
 	if (!tty_clamp_line(tty, ctx, 0, py, ctx->sx, &i, &x, &rx, &ry))
 		return (0);
-	tty_bidi_balance(tty, ctx->s, i, py, rx, x == 0, &sc);
+	tty_bidi_balance(tty, ctx->s, i, py, rx, x == 0,
+	    ctx->style_ctx.bidi, &sc);
 	return (sc.controls != 0);
 }
 

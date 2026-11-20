@@ -3139,7 +3139,7 @@ int	tty_bidi_agree(const struct grid_cell *);
 int	tty_bidi_keep_lead(int, const struct grid_cell *, u_int);
 void	tty_bidi_unlead(struct grid_cell *);
 void	tty_bidi_balance(struct tty *, struct screen *, u_int, u_int, u_int,
-	    int, struct tty_bidi_scan *);
+	    int, int, struct tty_bidi_scan *);
 void	tty_bidi_close(struct tty *, struct screen *, u_int, u_int, u_int,
 	    u_int, u_int, int, int, const struct tty_style_ctx *);
 void	tty_set_selection(struct tty *, const char *, const char *, size_t);
