@@ -495,6 +495,7 @@ enum tty_code_code {
 	TTYC_BCE,
 	TTYC_BEL,
 	TTYC_BIDI,
+	TTYC_BIDIREG,
 	TTYC_BLINK,
 	TTYC_BOLD,
 	TTYC_CIVIS,
@@ -1857,6 +1858,17 @@ struct tty_style_ctx {
 #define TTY_STYLE_BIDI_AUTO 0x1
 #define TTY_STYLE_BIDI_RTL 0x2
 #define TTY_STYLE_BIDI_ISOLATE 0x4
+#define TTY_STYLE_BIDI_BALANCE 0x8
+#define TTY_STYLE_BIDI_OUTER 0x10
+};
+
+/* Isolate controls and non-blank cells of part of a line, as drawn. */
+struct tty_bidi_scan {
+	u_int	controls;	/* isolate controls written */
+	u_int	open;		/* initiators no PDI closes */
+	u_int	first;		/* first non-blank cell, or the width */
+	u_int	last;		/* cell after the last non-blank one, or 0 */
+	u_int	lastctl;	/* after the last control's character, or 0 */
 };
 
 /* Maximum reported terminal size. */
@@ -1898,6 +1910,10 @@ struct tty {
 	u_int		 rleft;
 	u_int		 rright;
 
+	u_int		 bidi_flush;
+	u_char		*bidi_rows;
+	u_int		 bidi_nrows;
+
 	struct event	 event_in;
 	struct evbuffer	*in;
 	struct event	 event_out;
@@ -1935,6 +1951,7 @@ struct tty {
 #define TTY_BIDI 0x100000
 #define TTY_BIDIAUTO 0x200000
 #define TTY_BIDIRTL 0x400000
+#define TTY_BIDIBDSM 0x800000
 #define TTY_ALL_REQUEST_FLAGS \
 	(TTY_HAVEDA|TTY_HAVEDA2|TTY_HAVEXDA|TTY_HAVESYNC|TTY_HAVEKITTYGRAPHICS)
 	int		 flags;
@@ -2014,12 +2031,8 @@ struct tty_ctx {
 	u_int			 ocx;
 	u_int			 ocy;
 
-	/*
-	 * The pane cursor; ocx and ocy are not it while collected runs are
-	 * flushed.
-	 */
-	u_int			 cursor_x;
-	u_int			 cursor_y;
+	/* The collected line flush this is part of, or 0. */
+	u_int			 flush;
 
 	u_int			 orupper;
 	u_int			 orlower;
@@ -3058,6 +3071,8 @@ struct environ *environ_for_session(struct session *, int);
 /* tty-draw.c */
 void	tty_draw_line(struct tty *, struct screen *, u_int, u_int, u_int,
 	    u_int, u_int, const struct tty_style_ctx *);
+void	tty_draw_line_bidi_scan(struct tty *, struct screen *, u_int, u_int,
+	    u_int, u_int, int, struct tty_bidi_scan *);
 
 /* tty.c */
 void	tty_create_log(void);
@@ -3112,16 +3127,21 @@ void	tty_free(struct tty *);
 void	tty_update_features(struct tty *);
 int	tty_has_bidi(struct tty *);
 int	tty_pane_bidi(struct window_pane *);
-void	tty_set_bidi(struct tty *, int);
+int	tty_segment_bidi(struct window_pane *);
+int	tty_bidi_owner(struct tty *, struct window_pane *);
+int	tty_bidi_rows_changed(struct tty *, struct window *);
+int	tty_bidi_outer_row(struct tty *, u_int);
+void	tty_set_bidi(struct tty *, struct window *);
 void	tty_set_bidi_ctx(struct tty *, struct tty_ctx *);
 void	tty_bidi_isolate(struct tty *, int, u_int, u_int);
 u_int	tty_bidi_lead_size(const struct grid_cell *);
 int	tty_bidi_agree(const struct grid_cell *);
-int	tty_bidi_lead_ok(struct tty *, const struct grid_cell *, u_int);
+int	tty_bidi_keep_lead(int, const struct grid_cell *, u_int);
 void	tty_bidi_unlead(struct grid_cell *);
+void	tty_bidi_balance(struct tty *, struct screen *, u_int, u_int, u_int,
+	    int, int, struct tty_bidi_scan *);
 void	tty_bidi_close(struct tty *, struct screen *, u_int, u_int, u_int,
-	    u_int, u_int, u_int, u_int);
-int	tty_bidi_keep(struct screen *, u_int, u_int, u_int);
+	    u_int, u_int, int, int, const struct tty_style_ctx *);
 void	tty_set_selection(struct tty *, const char *, const char *, size_t);
 void	tty_write(void (*)(struct tty *, const struct tty_ctx *),
 	    struct tty_ctx *);

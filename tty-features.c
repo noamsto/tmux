@@ -165,7 +165,7 @@ static const struct tty_feature tty_feature_usstyle = {
 	0
 };
 
-/* Terminal supports per-pane bidi with isolates. */
+/* Outer bidi mode for rows a bidi pane owns, isolate regions on other rows. */
 static const char *const tty_feature_bidi_capabilities[] = {
 	"Enbidi=\\E[8h",
 	"Dsbidi=\\E[8l",
@@ -173,6 +173,7 @@ static const char *const tty_feature_bidi_capabilities[] = {
 	"Dsbida=\\E[?2501l",
 	"Enbidr=\\E[2 k",
 	"Dsbidr=\\E[0 k",
+	"Bidireg",
 	NULL
 };
 static const struct tty_feature tty_feature_bidi = {

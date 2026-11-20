@@ -375,23 +375,6 @@ screen_write_should_draw_line(struct screen_write_ctx *ctx, u_int y)
 	return (screen_write_should_draw_lines(ctx, y, 1));
 }
 
-/*
- * Set the pane cursor used to close a pane's isolates. Only the pane's own
- * screen has it; others (such as a mode screen) have no cursor.
- */
-static void
-screen_write_set_ttyctx_cursor(struct screen_write_ctx *ctx,
-    struct tty_ctx *ttyctx, u_int cx, u_int cy)
-{
-	if (ctx->wp == NULL || ctx->s != &ctx->wp->base) {
-		ttyctx->cursor_x = UINT_MAX;
-		ttyctx->cursor_y = UINT_MAX;
-		return;
-	}
-	ttyctx->cursor_x = cx;
-	ttyctx->cursor_y = cy;
-}
-
 /* Set up context for TTY command. */
 static void
 screen_write_initctx(struct screen_write_ctx *ctx, struct tty_ctx *ttyctx,
@@ -408,7 +391,6 @@ screen_write_initctx(struct screen_write_ctx *ctx, struct tty_ctx *ttyctx,
 
 	ttyctx->ocx = s->cx;
 	ttyctx->ocy = s->cy;
-	screen_write_set_ttyctx_cursor(ctx, ttyctx, s->cx, s->cy);
 	ttyctx->orlower = s->rlower;
 	ttyctx->orupper = s->rupper;
 
@@ -2674,8 +2656,7 @@ screen_write_collect_flush_scrolled(struct screen_write_ctx *ctx)
 
 /* Flush a collected line. */
 static u_int
-screen_write_collect_flush_line(struct screen_write_ctx *ctx, u_int y,
-    u_int cx, u_int cy)
+screen_write_collect_flush_line(struct screen_write_ctx *ctx, u_int y)
 {
 	struct window_pane		*wp = ctx->wp;
 	struct screen			*s = ctx->s;
@@ -2688,9 +2669,12 @@ screen_write_collect_flush_line(struct screen_write_ctx *ctx, u_int y,
 	struct tty_ctx			 ttyctx;
 	struct visible_ranges		*r;
 	struct visible_range		*ri;
+	static u_int			 flush;
 
 	if (TAILQ_EMPTY(&cl->items))
 		return (0);
+	if (++flush == 0)
+		flush = 1;
 
 	if (wp != NULL) {
 		wsx = wp->window->sx;
@@ -2744,15 +2728,13 @@ screen_write_collect_flush_line(struct screen_write_ctx *ctx, u_int y,
 			screen_write_set_cursor(ctx, w_start, y);
 			if (ci->type == CLEAR) {
 				screen_write_initctx(ctx, &ttyctx, 1, 0);
-				screen_write_set_ttyctx_cursor(ctx, &ttyctx, cx,
-				    cy);
+				ttyctx.flush = flush;
 				ttyctx.bg = ci->bg;
 				ttyctx.n = w_length;
 				tty_write(tty_cmd_clearcharacter, &ttyctx);
 			} else {
 				screen_write_initctx(ctx, &ttyctx, 0, 1);
-				screen_write_set_ttyctx_cursor(ctx, &ttyctx, cx,
-				    cy);
+				ttyctx.flush = flush;
 				if (ttyctx.flags & TTY_CTX_PANE_OBSCURED) {
 					ttyctx.n = w_length;
 					tty_write(tty_cmd_redrawline, &ttyctx);
@@ -2815,8 +2797,7 @@ screen_write_collect_flush(struct screen_write_ctx *ctx, int scroll_only,
 
 	cx = s->cx; cy = s->cy;
 	for (y = 0; y < screen_size_y(s); y++)
-		items += screen_write_collect_flush_line(ctx, y, cx,
-			    cy);
+		items += screen_write_collect_flush_line(ctx, y);
 	s->cx = cx; s->cy = cy;
 
 	log_debug("%s: flushed %u items (%s)", __func__, items, from);
@@ -3190,7 +3171,6 @@ screen_write_cell1(struct screen_write_ctx *ctx, const struct grid_cell *gc,
 		screen_write_set_cursor(ctx, s->cx + width, -1);
 	else
 		screen_write_set_cursor(ctx, sx - not_wrap, -1);
-	screen_write_set_ttyctx_cursor(ctx, &ttyctx, s->cx, s->cy);
 
 	/* Create space for character in insert mode. */
 	if ((s->mode & MODE_INSERT) && ins_width != 0) {
@@ -3301,13 +3281,13 @@ screen_write_cell(struct screen_write_ctx *ctx, const struct grid_cell *gc)
 
 	/*
 	 * Store the kept controls before the char so every redraw writes them
-	 * at column 0 ahead of it, where the terminal applies them. The
-	 * terminal drops them before a cell whose width it may see
-	 * differently, and on a row continuing a wrapped line it stores them
-	 * with the row above, so then they are dropped.
+	 * at column 0 ahead of it, where the terminal applies them whatever
+	 * the cell's width. A variation selector that widens the cell later
+	 * drops them, as in the terminal (screen_write_combine). On a row
+	 * continuing a wrapped line the terminal stores them with the row
+	 * above, so then they are dropped.
 	 */
 	if (!screen_write_lead_target(ctx) ||
-	    !tty_bidi_agree(gc) ||
 	    n + gc->data.size >= UTF8_SIZE) {
 		screen_write_cell1(ctx, gc, 0);
 		return;

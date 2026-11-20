@@ -18,6 +18,7 @@
 
 #include <sys/types.h>
 
+#include <stdlib.h>
 #include <string.h>
 
 #include "tmux.h"
@@ -45,7 +46,7 @@ static const char* tty_draw_line_states[] = {
 /* Clear part of the line. */
 static void
 tty_draw_line_clear(struct tty *tty, u_int px, u_int py, u_int nx,
-    const struct grid_cell *defaults, u_int bg, int wrapped, int spaces)
+    const struct grid_cell *defaults, u_int bg, int wrapped)
 {
 	/* Nothing to clear. */
 	if (nx == 0)
@@ -63,14 +64,14 @@ tty_draw_line_clear(struct tty *tty, u_int px, u_int py, u_int nx,
 		}
 
 		/* At the start of the line. Use EL1. */
-		if (!spaces && px == 0 && tty_term_has(tty->term, TTYC_EL1)) {
+		if (px == 0 && tty_term_has(tty->term, TTYC_EL1)) {
 			tty_cursor(tty, px + nx - 1, py);
 			tty_putcode(tty, TTYC_EL1);
 			return;
 		}
 
 		/* Section of line. Use ECH if possible. */
-		if (!spaces && tty_term_has(tty->term, TTYC_ECH)) {
+		if (tty_term_has(tty->term, TTYC_ECH)) {
 			tty_cursor(tty, px, py);
 			tty_putcode_i(tty, TTYC_ECH, nx);
 			return;
@@ -114,11 +115,175 @@ tty_draw_line_get_empty(const struct grid_cell *gc,
 	return (empty);
 }
 
-/* Copy cell data without isolate controls. */
-static size_t
-tty_draw_line_strip(char *buf, const struct utf8_data *ud)
+/*
+ * Initiators a segment tmux wraps in an isolate keeps open: they are all closed
+ * in its last cell, and kitty keeps only 24 code points in one cell. If the
+ * segment is one cell at column 0, that cell holds the region's own initiator
+ * (the terminal applies it to the next cell there), its own text (up to 16:
+ * an ASCII char and 15 two byte combining marks in its UTF8_SIZE bytes), the
+ * segment's closers (the kept initiators and the region's own) and the
+ * initiator of an isolated span starting in the next column:
+ * 1 + 16 + 6 + 1 = 24.
+ */
+#define TTY_DRAW_LINE_DEPTH_MAX 5
+
+/* Isolate controls of a segment being balanced. */
+struct tty_draw_line_bidi {
+	u_int	 depth;		/* initiators open */
+	u_int	 seen;		/* initiators so far */
+	u_int	*drop;		/* numbers of the initiators to drop */
+	u_int	 ndrop;
+	u_int	 next;
+	u_int	 max;		/* depth kept, deeper initiators are dropped */
+	u_int	 skipped;	/* dropped initiators no PDI closes yet */
+};
+
+/* Get cell px of line py as drawn at terminal column atx. */
+static const struct grid_cell *
+tty_draw_line_get_cell(__unused struct tty *tty, struct screen *s, u_int px,
+    u_int py, u_int atx, int bits, struct grid_cell *gc)
 {
-	size_t	i, len = 0;
+	grid_view_get_cell(s->grid, px, py, gc);
+	if (!tty_bidi_keep_lead(bits, gc, atx))
+		tty_bidi_unlead(gc);
+#ifdef ENABLE_IMAGES
+	/* Map an image cell if needed. */
+	return (image_map_cell(tty, s->grid, px, s->grid->hsize + py, gc, gc,
+	    NULL));
+#else
+	return (gc);
+#endif
+}
+
+/*
+ * Walk cells px to px + nx - 1 of line py, drawn from terminal column atx, as
+ * tty_draw_line does: it writes no text for padding, zero width cells or a
+ * wide character cut off at the end, and no isolate control of a line drawing
+ * cell. The other cells it skips as empty (spaces, tabs and cleared cells)
+ * never hold controls. Count the controls written and the initiators no PDI
+ * closes, and find the cell after the last control and the non-blank cells:
+ * padding, or a cell holding anything but a space (a control included),
+ * whatever its background. If b is not NULL, also number those initiators in
+ * order from 0, counting every initiator tty_draw_line_balance sees. In a
+ * segment tmux wraps in an isolate, an initiator deeper than
+ * TTY_DRAW_LINE_DEPTH_MAX is dropped with the PDI closing it; they still count
+ * as controls, because a write that removes one changes the controls after it.
+ */
+static void
+tty_draw_line_scan(__unused struct tty *tty, struct screen *s, u_int px,
+    u_int py, u_int nx, u_int atx, int bits, struct tty_bidi_scan *sc,
+    struct tty_draw_line_bidi *b)
+{
+	struct grid_cell	 gc, ngc;
+	const struct grid_cell	*gcp;
+	const u_char		*cp;
+	u_int			 i, j, next = 0, seen = 0, size = 0;
+	u_int			 max = UINT_MAX, skipped = 0;
+
+	if (bits & TTY_STYLE_BIDI_ISOLATE)
+		max = TTY_DRAW_LINE_DEPTH_MAX;
+	sc->controls = 0;
+	sc->open = 0;
+	sc->first = nx;
+	sc->last = 0;
+	sc->lastctl = 0;
+	for (i = 0; i < nx; i++) {
+		grid_view_get_cell(s->grid, px + i, py, &gc);
+		if (tty_bidi_lead_size(&gc) != 0 &&
+		    !tty_bidi_keep_lead(bits, &gc, atx + i))
+			tty_bidi_unlead(&gc);
+		if ((gc.flags & GRID_FLAG_PADDING) ||
+		    gc.data.size != 1 ||
+		    gc.data.data[0] != ' ') {
+			if (sc->first == nx)
+				sc->first = i;
+			sc->last = i + 1;
+		}
+
+		/* The rest of a wide character, or one cut off. */
+		if (i < next)
+			continue;
+#ifdef ENABLE_IMAGES
+		gcp = image_map_cell(tty, s->grid, px + i, s->grid->hsize + py,
+		    &gc, &gc, NULL);
+#else
+		gcp = &gc;
+#endif
+		next = i + 1;
+		if ((gcp->flags & GRID_FLAG_PADDING) || gcp->data.width == 0)
+			continue;
+		if (gcp->data.width > nx - i) {
+			next = nx;
+			continue;
+		}
+		next = i + gcp->data.width;
+		if ((gcp->flags & GRID_FLAG_SELECTED) &&
+		    screen_select_cell(s, &ngc, gcp))
+			gcp = &ngc;
+		if (gcp->attr & GRID_ATTR_CHARSET)
+			continue;
+		cp = gcp->data.data;
+		for (j = 0; j + 2 < gcp->data.size; j++) {
+			if (cp[j] != 0xe2 || cp[j + 1] != 0x81)
+				continue;
+			if (cp[j + 2] >= 0xa6 && cp[j + 2] <= 0xa8) {
+				sc->controls++;
+				sc->lastctl = next;
+				if (sc->open >= max) {
+					skipped++;
+					continue;
+				}
+				sc->open++;
+				if (b == NULL)
+					continue;
+				if (b->ndrop == size) {
+					size += 8;
+					b->drop = xreallocarray(b->drop, size,
+					    sizeof *b->drop);
+				}
+				b->drop[b->ndrop++] = seen++;
+			} else if (cp[j + 2] == 0xa9) {
+				sc->controls++;
+				sc->lastctl = next;
+				if (skipped != 0) {
+					skipped--;
+					continue;
+				}
+				if (sc->open == 0)
+					continue;
+				sc->open--;
+				if (b != NULL)
+					b->ndrop--;
+			}
+		}
+	}
+}
+
+/*
+ * Scan the isolate controls tty_draw_line writes for cells px to px + nx - 1
+ * of line py, drawn from terminal column atx, and its non-blank cells.
+ */
+void
+tty_draw_line_bidi_scan(struct tty *tty, struct screen *s, u_int px, u_int py,
+    u_int nx, u_int atx, int bits, struct tty_bidi_scan *sc)
+{
+	tty_draw_line_scan(tty, s, px, py, nx, atx, bits, sc, NULL);
+}
+
+/*
+ * Copy cell data, dropping a PDI with no initiator open in the segment so it
+ * cannot close an isolate around it, the initiators the segment never closes
+ * and those deeper than b->max with the PDIs closing them. A line drawing cell
+ * is written one byte at a time through the line drawing character set, so
+ * every control in it is dropped.
+ */
+static size_t
+tty_draw_line_balance(char *buf, const struct grid_cell *gc,
+    struct tty_draw_line_bidi *b)
+{
+	const struct utf8_data	*ud = &gc->data;
+	size_t			 i, len = 0;
+	u_int			 n;
 
 	for (i = 0; i < ud->size; i++) {
 		if (i + 2 < ud->size &&
@@ -126,8 +291,36 @@ tty_draw_line_strip(char *buf, const struct utf8_data *ud)
 		    ud->data[i + 1] == 0x81 &&
 		    ud->data[i + 2] >= 0xa6 &&
 		    ud->data[i + 2] <= 0xa9) {
-			i += 2;
-			continue;
+			if (gc->attr & GRID_ATTR_CHARSET) {
+				i += 2;
+				continue;
+			}
+			if (ud->data[i + 2] == 0xa9) {
+				if (b->skipped != 0) {
+					b->skipped--;
+					i += 2;
+					continue;
+				}
+				if (b->depth == 0) {
+					i += 2;
+					continue;
+				}
+				b->depth--;
+			} else {
+				n = b->seen++;
+				if (b->next != b->ndrop &&
+				    b->drop[b->next] == n) {
+					b->next++;
+					i += 2;
+					continue;
+				}
+				if (b->depth >= b->max) {
+					b->skipped++;
+					i += 2;
+					continue;
+				}
+				b->depth++;
+			}
 		}
 		buf[len++] = ud->data[i];
 	}
@@ -145,8 +338,10 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	struct grid_line	*gl;
 	u_int			 i, j, last_i, cx, ex, width;
 	u_int			 cellsize, bg;
-	int			 flags, empty, wrapped = 0, spaces, strip = 0;
-	int			 after;
+	int			 flags, empty, wrapped = 0, bits, lead = 0;
+	int			 after = 0;
+	struct tty_draw_line_bidi bidi = { 0 };
+	struct tty_bidi_scan	 sc;
 	char			 buf[1000];
 	size_t			 len;
 	enum tty_draw_line_state current_state, next_state;
@@ -163,13 +358,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 		style_ctx = &default_style_ctx;
 	}
 	defaults = style_ctx->defaults;
-
-	/*
-	 * The first and last cells of an isolated pane line hold the isolate
-	 * controls, which are lost if those cells are erased rather than
-	 * written.
-	 */
-	spaces = (style_ctx->bidi & TTY_STYLE_BIDI_ISOLATE);
+	bits = style_ctx->bidi;
 
 	/*
 	 * py is the line in the screen to draw. px is the start x and nx is
@@ -185,8 +374,6 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 		nx = tty->sx - atx;
 	if (nx == 0)
 		return;
-	if (spaces && !tty_bidi_keep(s, px, py, nx))
-		strip = 1;
 
 	/*
 	 * Clamp the width to cellsize - note this is not cellused, because
@@ -201,11 +388,32 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	    "bg=%d", __func__, px, px + nx, py, ex, atx, aty, defaults->fg,
 	    defaults->bg);
 
-	/* Turn off cursor while redrawing and reset region and margins. */
+	/*
+	 * A segment tmux does not wrap in an isolate is laid out alone, where
+	 * an initiator left open makes no isolate, so drop those. One it wraps
+	 * keeps only a few of its own initiators open.
+	 */
+	bidi.max = UINT_MAX;
+	if (bits & TTY_STYLE_BIDI_ISOLATE)
+		bidi.max = TTY_DRAW_LINE_DEPTH_MAX;
+	else if (bits & TTY_STYLE_BIDI_BALANCE)
+		tty_draw_line_scan(tty, s, px, py, nx, atx, bits, &sc, &bidi);
+
+	/*
+	 * Turn off cursor while redrawing and reset region and margins. With
+	 * a bidi pane visible a known region is kept on a region row, so a
+	 * pane that scrolls with it does not set it again after every line:
+	 * the cursor moves within it and the line is not continued by autowrap
+	 * from its bottom (see below), so nothing drawn here scrolls it.
+	 */
 	flags = (tty->flags & TTY_NOCURSOR);
 	tty->flags |= TTY_NOCURSOR;
 	tty_update_mode(tty, tty->mode, s);
-	tty_region_off(tty);
+	if ((~bits & TTY_STYLE_BIDI_BALANCE) ||
+	    (bits & TTY_STYLE_BIDI_OUTER) ||
+	    (~tty->flags & TTY_BIDI) ||
+	    tty->rupper == UINT_MAX)
+		tty_region_off(tty);
 	tty_margin_off(tty);
 
 	/* Start with the default cell as the last cell. */
@@ -230,15 +438,22 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 
 	/*
 	 * The terminal keeps a control written at column 0 for the next cell
-	 * written there, but drops it before a cell whose width it may see
-	 * differently, so then the control goes after that cell.
+	 * written there, whatever its width, but with the outer bidi mode on
+	 * it drops it before a cell whose width it may see differently, so
+	 * then the control goes after that cell. A blank segment gets no
+	 * isolate.
 	 */
-	after = 0;
-	if ((style_ctx->bidi & TTY_STYLE_BIDI_ISOLATE) && atx == 0) {
-		if (cx != 0 || tty_bidi_agree(&gc))
-			tty_bidi_isolate(tty, style_ctx->bidi, 0, aty);
-		else
+	if ((bits & TTY_STYLE_BIDI_ISOLATE) && atx == 0) {
+		tty_bidi_balance(tty, s, px, py, nx, 1, bits, &sc);
+		if (sc.last != 0 &&
+		    (bits & TTY_STYLE_BIDI_OUTER) &&
+		    cx == 0 &&
+		    !tty_bidi_agree(&gc))
 			after = 1;
+		else if (sc.last != 0) {
+			tty_bidi_isolate(tty, bits, 0, aty);
+			lead = 1;
+		}
 	}
 	if (cx != 0) {
 		/* Find the previous cell for the background colour. */
@@ -259,20 +474,41 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 		}
 		tty_attributes(tty, &last, style_ctx);
 		log_debug("%s: clearing %u padding cells", __func__, cx);
-		tty_draw_line_clear(tty, atx, aty, cx, defaults, bg, 0,
-		    spaces);
+		tty_draw_line_clear(tty, atx, aty, cx, defaults, bg, 0);
 		if (cx == ex)
 			goto out;
 		atx += cx;
 		px += cx;
 		nx -= cx;
+	} else if (lead) {
+		/*
+		 * Erasing cell 0 would drop the initiator, so a blank first
+		 * cell is written as a space and the clear starts after it.
+		 */
+		grid_view_get_cell(gd, px, py, &gc);
+		if (!tty_bidi_keep_lead(bits, &gc, 0))
+			tty_bidi_unlead(&gc);
+		if (tty_draw_line_get_empty(&gc, &last, nx) != 0) {
+			tty_attributes(tty, &last, style_ctx);
+			tty_draw_line_clear(tty, atx, aty, 1, defaults,
+			    last.bg, 0);
+			atx++;
+			px++;
+			nx--;
+		}
 	}
 
-	/* Did the previous line wrap on to this one? */
+	/*
+	 * Did the previous line wrap on to this one? Not for an isolate
+	 * initiator, which must be stored with this row, nor from the bottom
+	 * of the scroll region, where wrapping would scroll it.
+	 */
 	if (py != 0 &&
+	    !lead &&
 	    atx == 0 &&
 	    tty->cx >= tty->sx &&
 	    tty->cy != UINT_MAX &&
+	    tty->cy != tty->rlower &&
 	    tty->cy + 1 == aty &&
 	    nx == tty->sx) {
 		gl = grid_get_line(gd, gd->hsize + py - 1);
@@ -284,10 +520,10 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	 * On a row the terminal wrapped onto, it stores controls written at
 	 * column 0 with the row above, so position the cursor explicitly.
 	 */
-	if (wrapped && (~style_ctx->bidi & TTY_STYLE_BIDI_ISOLATE)) {
+	if (wrapped && (~bits & TTY_STYLE_BIDI_ISOLATE)) {
 		grid_view_get_cell(gd, px, py, &gc);
 		if (tty_bidi_lead_size(&gc) != 0 &&
-		    tty_bidi_lead_ok(tty, &gc, 0))
+		    tty_bidi_keep_lead(bits, &gc, 0))
 			wrapped = 0;
 	}
 
@@ -327,18 +563,8 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 					empty = 0;
 			} else {
 				/* Get the current cell. */
-				grid_view_get_cell(gd, px + i, py, &gc);
-				if ((style_ctx->bidi &
-				    TTY_STYLE_BIDI_ISOLATE) ||
-				    !tty_bidi_lead_ok(tty, &gc, atx + i))
-					tty_bidi_unlead(&gc);
-				gcp = &gc;
-
-#ifdef ENABLE_IMAGES
-				/* Map an image cell if needed. */
-				gcp = image_map_cell(tty, gd, px + i,
-				    gd->hsize + py, gcp, &gc, NULL);
-#endif
+				gcp = tty_draw_line_get_cell(tty, s, px + i, py,
+				    atx + i, bits, &gc);
 
 				/* Work out empty cells. */
 				empty = tty_draw_line_get_empty(gcp, &last,
@@ -384,8 +610,7 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 			if (current_state == TTY_DRAW_LINE_EMPTY) {
 				tty_attributes(tty, &last, style_ctx);
 				tty_draw_line_clear(tty, atx + last_i, aty,
-				    i - last_i, defaults, last.bg, wrapped,
-				    spaces);
+				    i - last_i, defaults, last.bg, wrapped);
 				wrapped = 0;
 			} else if (next_state != TTY_DRAW_LINE_SAME &&
 			    len != 0) {
@@ -407,10 +632,10 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 
 		/* Append the cell if it is not empty and not padding. */
 		if (next_state != TTY_DRAW_LINE_EMPTY) {
-			if (strip)
-				len += tty_draw_line_strip(buf + len,
-				    &gcp->data);
-			else {
+			if (bits & TTY_STYLE_BIDI_BALANCE) {
+				len += tty_draw_line_balance(buf + len, gcp,
+				    &bidi);
+			} else {
 				memcpy(buf + len, gcp->data.data,
 				    gcp->data.size);
 				len += gcp->data.size;
@@ -432,9 +657,10 @@ tty_draw_line(struct tty *tty, struct screen *s, u_int px, u_int py, u_int nx,
 	}
 
 	if (after)
-		tty_bidi_isolate(tty, style_ctx->bidi, 1, aty);
+		tty_bidi_isolate(tty, bits, 1, aty);
 
 out:
+	free(bidi.drop);
 	tty->flags = (tty->flags & ~TTY_NOCURSOR)|flags;
 	tty_update_mode(tty, tty->mode, s);
 }
