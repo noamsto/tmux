@@ -646,7 +646,7 @@ tty_update_features(struct tty *tty)
 	}
 }
 
-/* Does this terminal want per-pane bidi? It needs Bidireg and Enbidi. */
+/* Does this terminal want per-pane bidi? */
 int
 tty_has_bidi(struct tty *tty)
 {
@@ -881,7 +881,6 @@ void
 tty_set_bidi_ctx(struct tty *tty, struct tty_ctx *ctx)
 {
 	struct window_pane	*wp = ctx->arg;
-
 	u_int			 y;
 
 	ctx->style_ctx.bidi = 0;
@@ -906,10 +905,8 @@ tty_set_bidi_ctx(struct tty *tty, struct tty_ctx *ctx)
 
 	/* No repair of a full-width line's isolates follows a terminal op. */
 	if ((ctx->style_ctx.bidi & TTY_STYLE_BIDI_ISOLATE) &&
-	    tty_full_width(tty, ctx)) {
-		log_debug("%s: full-width isolate, redraw", __func__);
+	    tty_full_width(tty, ctx))
 		ctx->flags |= TTY_CTX_BIDI_REDRAW;
-	}
 }
 
 /*

@@ -5,10 +5,10 @@
 # isolate region (the initiator right before its first cell at column 0, right
 # after the border cell otherwise; the PDI after the segment), plain panes get
 # none of their own, and the client does not switch the terminal's bidi modes
-# for them; a bidi pane that fills the window gets BDSM and no isolate. An inner tmux
-# client (with the bidi terminal feature) runs in a pane of an outer tmux; the
-# bytes it writes for a refresh are captured from the outer pane (pipe-pane -O)
-# and checked as they are, with the SGR sequences taken out.
+# for them; a bidi pane that fills the window gets BDSM and no isolate. An
+# inner tmux client (with the bidi terminal feature) runs in a pane of an outer
+# tmux; the bytes it writes for a refresh are captured from the outer pane
+# (pipe-pane -O) and checked as they are, with the SGR sequences taken out.
 
 PATH=/bin:/usr/bin
 TERM=screen
@@ -174,8 +174,9 @@ expect stray "\033[Hpq" "the stray PDI dropped"
 
 # The pane's own open FSI (as fish leaves it after the prompt): the pane's PDI
 # and tmux's both close in the segment's last cell, written with the cursor at
-# the border column (the row is written up to it), and typing a character right of the FSI writes the
-# character and rewrites only that cell, not the row.
+# the border column (the row is written up to it), and typing a character
+# right of the FSI writes the character and rewrites only that cell, not the
+# row.
 $TMUX kill-server 2>/dev/null
 $TMUX2 kill-server 2>/dev/null
 sleep 1
