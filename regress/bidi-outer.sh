@@ -27,8 +27,11 @@ RAW=$(mktemp)
 RAW2=$(mktemp)
 SGR=$(mktemp)
 LOOP=$(mktemp)
+OFF=$(mktemp)
+CTL=$(mktemp)
 GO=$(mktemp -u)
-trap 'rm -f "$RAW" "$RAW2" "$SGR" "$LOOP" "$LOOP.off" "$LOOP.bidi" "$GO"; $TMUX kill-server 2>/dev/null; $TMUX2 kill-server 2>/dev/null' \
+GO2=$(mktemp -u)
+trap 'rm -f "$RAW" "$RAW2" "$SGR" "$LOOP" "$OFF" "$CTL" "$GO" "$GO2"; $TMUX kill-server 2>/dev/null; $TMUX2 kill-server 2>/dev/null' \
 	0 1 15
 
 exit_status=0
@@ -102,9 +105,11 @@ since() {
 }
 
 # count <string> [file]
-#   The number of times string (printf format) occurs in file ($SGR).
+#   The number of times string (printf format) occurs in file ($SGR); newlines
+#   are matched as ordinary bytes.
 count() {
-	LC_ALL=C grep -aoF -- "$(printf '%b' "$1")" "${2:-$SGR}" | wc -l
+	LC_ALL=C tr '\n' '\001' <"${2:-$SGR}" |
+		LC_ALL=C grep -aoF -- "$(printf '%b' "$1" | tr '\n' '\001')" | wc -l
 }
 
 # expect <case> <bytes> <what>
@@ -362,9 +367,12 @@ $TMUX2 killp -t %1 || exit 1
 sleep 0.3
 attach
 : >"$RAW2"
-$TMUX new-window "TERM=xterm-256color TMUX= exec $TMUX2 attach -t0" || exit 1
+rm -f "$GO2"
+$TMUX new-window "while [ ! -e '$GO2' ]; do sleep 0.01; done; TERM=xterm-256color TMUX= exec $TMUX2 attach -t0" || exit 1
 $TMUX pipe-pane -O -t1 "cat >>'$RAW2'" || exit 1
+touch "$GO2"
 sleep 1
+mark
 $TMUX2 splitw -h "$PANE" || exit 1
 $TMUX2 killp -t %2 || exit 1
 sleep 0.5
@@ -595,7 +603,7 @@ region_op split-el '\033[1;3H\033[K' "\033[1;3H\033[K"
 region_op split-ech '\033[1;2H\033[2X' "\033[2X"
 region_op split-ich '\033[1;2H\033[2@' "\033[2@"
 region_op split-dch '\033[1;2H\033[2P' "\033[2P"
-region_op split-scroll '\033[5;1H\nnew' "\033[1S"
+region_op split-scroll '\033[5;1H\nnew' "\r\nnew"
 
 # A full width bidi pane under a floating pane is obscured and its rows are
 # regions: its operations are line redraws too.
@@ -605,7 +613,7 @@ $TMUX2 new-pane -d -x20 -y3 -X50 -Y1 "$PANE" || exit 1
 attach
 region_op float-il '\033[2;1H\033[L' "\033[1L"
 region_op float-dch '\033[1;2H\033[2P' "\033[2P"
-region_op float-scroll '\033[5;1H\nnew' "\033[1S"
+region_op float-scroll '\033[5;1H\nnew' "\r\nnew"
 
 # A wide character at the row end survives DCH and ICH at column 3: the
 # outer screen shows the row as the inner pane has it, in a full width bidi
@@ -657,8 +665,8 @@ off_run() {
 	cp "$SGR" "$2"
 }
 off_run '*:bidi' "$RAW2"
-off_run 'nomatch:bidi' "$LOOP.off"
-cmp -s "$RAW2" "$LOOP.off" || {
+off_run 'nomatch:bidi' "$OFF"
+cmp -s "$RAW2" "$OFF" || {
 	echo "[FAIL] case feature-off: the bytes differ with the feature on and no bidi pane"
 	exit_status=1
 }
@@ -666,11 +674,10 @@ cmp -s "$RAW2" "$LOOP.off" || {
 	echo "[FAIL] case feature-off: nothing was captured"
 	exit_status=1
 }
-off_run '*:bidi' "$LOOP.bidi" bidi
-cmp -s "$RAW2" "$LOOP.bidi" && {
+off_run '*:bidi' "$CTL" bidi
+cmp -s "$RAW2" "$CTL" && {
 	echo "[FAIL] case feature-off: the control with a bidi pane wrote the same bytes"
 	exit_status=1
 }
-rm -f "$LOOP.off" "$LOOP.bidi"
 
 exit $exit_status

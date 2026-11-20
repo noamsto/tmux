@@ -226,6 +226,7 @@ $TMUX2 new -d -x80 -y5 "sleep 100" || exit 1
 $TMUX2 set -g status off || exit 1
 $TMUX2 set -g clear-on-attach off || exit 1
 $TMUX2 set -as terminal-features '*:bidi' || exit 1
+rm -f "$GO"
 $TMUX new -d -x80 -y5 "while [ ! -e '$GO' ]; do sleep 0.01; done; TMUX= exec $TMUX2 attach" ||
 	exit 1
 : >"$RAW"
