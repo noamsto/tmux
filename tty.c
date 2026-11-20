@@ -687,21 +687,19 @@ tty_segment_bidi(struct window_pane *wp)
 /*
  * Does a bidi pane own its rows on this terminal, so they use the outer bidi
  * mode? It must fill the terminal width alone: this is tty_full_width on the
- * pane's context, with the x offset screen_write_set_client_cb gives it, and
- * no other floating pane may overlap it. A floating pane filling the width
- * on top owns its rows. tty_full_width ignores the window offset, so a pane
- * in a window bigger than the terminal must also reach the right edge of the
- * part shown.
+ * pane's context, and no other floating pane may overlap it. A floating pane
+ * filling the width on top owns its rows. No pane owns its rows beside a
+ * side status, which is on all of them. tty_full_width ignores the window
+ * offset, so a pane in a window bigger than the terminal must also reach the
+ * right edge of the part shown.
  */
 int
 tty_bidi_owner(struct tty *tty, struct window_pane *wp)
 {
-	struct client		*c = tty->client;
 	struct window_pane	*fwp;
-	int			 xoff = wp->xoff;
 	u_int			 ox, oy, sx, sy;
 
-	if (!tty_has_bidi(tty))
+	if (!tty_has_bidi(tty) || status_side_size(tty->client) != 0)
 		return (0);
 	if (!window_pane_is_visible(wp) || wp->layout_cell == NULL)
 		return (0);
@@ -715,9 +713,7 @@ tty_bidi_owner(struct tty *tty, struct window_pane *wp)
 	}
 	if (tty_window_offset(tty, &ox, &oy, &sx, &sy) && wp->sx < ox + sx)
 		return (0);
-	if (status_side_at_column(c) == 0)
-		xoff += status_side_size(c);
-	return (xoff == 0 && wp->sx >= tty->sx);
+	return (wp->xoff == 0 && wp->sx >= tty->sx);
 }
 
 /*

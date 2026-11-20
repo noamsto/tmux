@@ -117,9 +117,15 @@ tty_draw_line_get_empty(const struct grid_cell *gc,
 
 /*
  * Initiators a segment tmux wraps in an isolate keeps open: they are all closed
- * in its last cell, and a terminal keeps only a few code points in one cell.
+ * in its last cell, and kitty keeps only 24 code points in one cell. If the
+ * segment is one cell at column 0, that cell holds the region's own initiator
+ * (the terminal applies it to the next cell there), its own text (up to 16:
+ * an ASCII char and 15 two byte combining marks in its UTF8_SIZE bytes), the
+ * segment's closers (the kept initiators and the region's own) and the
+ * initiator of an isolated span starting in the next column:
+ * 1 + 16 + 6 + 1 = 24.
  */
-#define TTY_DRAW_LINE_DEPTH_MAX 8
+#define TTY_DRAW_LINE_DEPTH_MAX 5
 
 /* Isolate controls of a segment being balanced. */
 struct tty_draw_line_bidi {

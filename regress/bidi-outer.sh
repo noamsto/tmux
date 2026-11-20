@@ -43,6 +43,7 @@ PDI='\0342\0201\0251'
 RFSI=$(printf '\342\201\250')
 RPDI=$(printf '\342\201\251')
 ISOLATES=$(printf '\342\201[\246-\251]')
+ACUTE=$(printf '\314\201')
 MODES='\033\[8h|\033\[8l|\033\[\?2501h|\033\[\?2501l|\033\[0 k'
 CLEAR='\033[?2501l\033[0 k\033[H\033[J'
 HEB='שלום'
@@ -155,6 +156,20 @@ expect_balanced() {
 	close=$(count "$PDI")
 	[ "$open" -ge 1 ] && [ "$open" -eq "$close" ] || {
 		echo "[FAIL] case $1: expected balanced isolates, got $open open, $close PDI"
+		exit_status=1
+	}
+}
+
+# expect_cell_fits <case>
+#   No cell holding a b and combining acute accents, written with the isolate
+#   controls after it, has more than the 24 code points kitty keeps in a cell.
+expect_cell_fits() {
+	got=$(LC_ALL=C grep -aoE -- "b($ACUTE)+($ACUTE|$ISOLATES)*" "$SGR" |
+		while IFS= read -r cell; do
+			printf '%s\n' "$cell" | LC_ALL=C grep -aoE -- "$ACUTE|$ISOLATES" | wc -l
+		done | sort -n | tail -n 1)
+	[ -n "$got" ] && [ "$got" -le 23 ] || {
+		echo "[FAIL] case $1: expected at most 24 code points in the last cell, got $((${got:-0} + 1))"
 		exit_status=1
 	}
 }
@@ -660,28 +675,66 @@ expect_none panned "\033[8h" "CSI 8 h (the pane does not own its rows)"
 expect panned "${FSI}0000000000 $HEB abc ${PDI}" \
     "the visible part of the bidi pane in an isolate"
 
+# The same with a side status on the right: the pane reaches the right edge of
+# the part shown, but the side status shares its rows.
+setup
+$TMUX2 resize-window -x160 -y5 || exit 1
+$TMUX2 set -g side-status right || exit 1
+write %0 "$BDSM_ON; printf '$HEB abc\\n'"
+attach
+since
+expect_none panned-side "\033[8h" "CSI 8 h (the pane does not own its rows)"
+expect panned-side "${FSI}$HEB abc" "the bidi pane in an isolate"
+
 # A bidi pane in a split leaving more initiators open than the terminal keeps
-# in one cell: only the first 8 are written, and its last cell holds 9 PDIs,
-# 8 for them and one for the region's own initiator.
+# in one cell: only the first 5 are written, and its last cell holds 6 PDIs,
+# 5 for them and one for the region's own initiator.
 setup
 $TMUX2 splitw -h "$PANE" || exit 1
 sleep 0.3
 write %0 "$BDSM_ON; printf x; i=0; while [ \$i -lt 20 ]; do printf '\\342\\201\\246a'; i=\$((i + 1)); done"
 attach
 since
-expect deep "${FSI}x${LRI}a${LRI}a${LRI}a${LRI}a${LRI}a${LRI}a${LRI}a${LRI}aaaaaaaaaaaaa" \
-    "8 of the pane's initiators written"
-expect deep "$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI" "9 PDIs closing the region"
-expect_none deep "$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI" "more than 9 PDIs in a row"
+expect deep "${FSI}x${LRI}a${LRI}a${LRI}a${LRI}a${LRI}aaaaaaaaaaaaaaaa" \
+    "5 of the pane's initiators written"
+expect deep "$PDI$PDI$PDI$PDI$PDI$PDI" "6 PDIs closing the region"
+expect_none deep "$PDI$PDI$PDI$PDI$PDI$PDI$PDI" "more than 6 PDIs in a row"
 expect_balanced deep
 
 # The same pane typing more initiators than it keeps after the client
-# attached: every line redraw and closer rewrite writes at most 9 PDIs.
+# attached: every line redraw and closer rewrite writes at most 6 PDIs.
 mark
 write %0 "printf '\\ny'; i=0; while [ \$i -lt 30 ]; do printf '\\342\\201\\246b'; sleep 0.01; i=\$((i + 1)); done; printf '\\342\\201\\251\\342\\201\\251c'"
 since
-expect deep-typed "$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI" "9 PDIs closing the region"
-expect_none deep-typed "$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI$PDI" "more than 9 PDIs in a row"
+expect deep-typed "$PDI$PDI$PDI$PDI$PDI$PDI" "6 PDIs closing the region"
+expect_none deep-typed "$PDI$PDI$PDI$PDI$PDI$PDI$PDI" "more than 6 PDIs in a row"
+
+# A region's last cell holding a b and 15 combining accents (31 of its 32
+# bytes) and closing 8 initiators left open still fits in a kitty cell, with
+# the initiator of the span starting in the next column: in a split and in a
+# borderless floating pane over a full width bidi pane.
+# deep_cell <cell text width>
+#   Shell for a bidi pane writing a Hebrew letter, 8 LRIs each before an a, the
+#   zeros filling it to the given width and a b with 15 combining accents.
+deep_cell() {
+	printf '%s' "$BDSM_ON; printf '\\327\\251'; i=0; while [ \$i -lt 8 ]; do printf '\\342\\201\\246a'; i=\$((i + 1)); done; printf '%0$(($1 - 10))d' 0; printf b; i=0; while [ \$i -lt 15 ]; do printf '\\314\\201'; i=\$((i + 1)); done"
+}
+setup
+$TMUX2 splitw -h "$PANE" || exit 1
+sleep 0.3
+write %0 "$(deep_cell 40)"
+attach
+since
+expect_cell_fits deep-cell-split
+setup
+write %0 "$BDSM_ON; i=0; while [ \$i -lt 5 ]; do printf '\\327\\251%079d' 0; i=\$((i + 1)); done"
+FLOAT=$($TMUX2 new-pane -d -PF '#{pane_id}' -x20 -y3 -X30 -Y1 "$PANE") || exit 1
+$TMUX2 set -p -t "$FLOAT" pane-border-lines none || exit 1
+sleep 0.3
+write "$FLOAT" "$(deep_cell 18)"
+attach
+since
+expect_cell_fits deep-cell-float
 
 # -T bidi with no bidi pane writes the same bytes as no bidi feature, for the
 # writes after the attach settled.
